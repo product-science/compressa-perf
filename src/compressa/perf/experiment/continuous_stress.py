@@ -5,7 +5,7 @@ import threading
 import random
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import List, Tuple
 from datetime import datetime
 
 from compressa.perf.experiment.inference import InferenceRunner
@@ -46,6 +46,7 @@ class ContinuousStressTestRunner:
         seed: int = 42,
         no_sign: bool = False,
         old_sign: bool = False,
+        account_pool: List[Tuple[str, str]] = None,
     ):
         self.db_path = db_path
         self.node_url = node_url
@@ -66,21 +67,56 @@ class ContinuousStressTestRunner:
 
         self.choice_generator = random.Random(seed)
         
-        # Create ONE shared client manager for all runners
-        num_clients = min(10, max(3, num_runners // 20))  # 3-10 clients based on runner count
-        max_connections_per_client = 50
+        # Account pool setup for random selection
+        self.account_pool = account_pool or []
         
-        logger.info(f"Creating shared client manager with {num_clients} clients, {max_connections_per_client} connections each for {num_runners} runners")
+        # Create client managers for each account in the pool
+        self._account_client_managers = {}
+        self._account_inference_runners = {}
         
-        self._shared_client_manager = OptimizedNodeClientManager(
-            node_url=node_url,
-            account_address=account_address,
-            private_key_hex=private_key_hex,
-            no_sign=no_sign,
-            old_sign=old_sign,
-            num_clients=num_clients,
-            max_connections_per_client=max_connections_per_client,
-        )
+        if self.account_pool and len(self.account_pool) > 1:
+            # Create persistent client managers for each account
+            num_clients = min(5, max(2, num_runners // 10))  # Fewer clients per account
+            max_connections_per_client = 20  # Fewer connections per client
+            
+            logger.info(f"Creating {len(self.account_pool)} client managers for account pool with {num_clients} clients, {max_connections_per_client} connections each")
+            
+            for i, (acc_address, acc_private_key) in enumerate(self.account_pool):
+                client_manager = OptimizedNodeClientManager(
+                    node_url=node_url,
+                    account_address=acc_address,
+                    private_key_hex=acc_private_key,
+                    no_sign=no_sign,
+                    old_sign=old_sign,
+                    num_clients=num_clients,
+                    max_connections_per_client=max_connections_per_client,
+                )
+                
+                inference_runner = InferenceRunner(
+                    shared_client_manager=client_manager,
+                    model_name=self.model_name,
+                )
+                
+                self._account_client_managers[acc_address] = client_manager
+                self._account_inference_runners[acc_address] = inference_runner
+                
+                logger.info(f"Created client manager {i+1}/{len(self.account_pool)} for account {acc_address}")
+        else:
+            # Create single shared client manager for single account
+            num_clients = min(10, max(3, num_runners // 20))  # 3-10 clients based on runner count
+            max_connections_per_client = 50
+            
+            logger.info(f"Creating shared client manager with {num_clients} clients, {max_connections_per_client} connections each for {num_runners} runners")
+            
+            self._shared_client_manager = OptimizedNodeClientManager(
+                node_url=node_url,
+                account_address=account_address,
+                private_key_hex=private_key_hex,
+                no_sign=no_sign,
+                old_sign=old_sign,
+                num_clients=num_clients,
+                max_connections_per_client=max_connections_per_client,
+            )
 
     def start_test(self):
         """
@@ -90,11 +126,12 @@ class ContinuousStressTestRunner:
         """
         self.executor = ThreadPoolExecutor(max_workers=self.num_runners)
         
-        # Create inference runner with shared client manager
-        self.inference_runner = InferenceRunner(
-            shared_client_manager=self._shared_client_manager,
-            model_name=self.model_name,
-        )
+        # Create inference runner with shared client manager (only for single account mode)
+        if not (self.account_pool and len(self.account_pool) > 1):
+            self.inference_runner = InferenceRunner(
+                shared_client_manager=self._shared_client_manager,
+                model_name=self.model_name,
+            )
 
         self._store_continuous_params()
 
@@ -123,6 +160,27 @@ class ContinuousStressTestRunner:
             # Clean up resources
             if hasattr(self, '_shared_client_manager'):
                 self._shared_client_manager.close_all()
+            if hasattr(self, '_account_client_managers'):
+                for client_manager in self._account_client_managers.values():
+                    client_manager.close_all()
+    
+    def _get_random_account(self) -> Tuple[str, str]:
+        """
+        Get a random account from the pool.
+        If no pool exists, return the default account.
+        Thread-safe.
+        """
+        if self.account_pool and len(self.account_pool) > 1:
+            # Return a random account from the pool
+            return self.choice_generator.choice(self.account_pool)
+        elif self.account_pool and len(self.account_pool) == 1:
+            # Single account in pool
+            return self.account_pool[0]
+        else:
+            # No pool, use default account
+            return self.account_address, self.private_key_hex
+    
+
 
     def _continuous_inference_loop(self):
         """
@@ -137,16 +195,40 @@ class ContinuousStressTestRunner:
     def _do_inference_task(self, prompt: str):
         """
         Single inference call. Stores the resulting measurement to DB.
+        If the request fails, waits 5 seconds before allowing the thread to continue.
+        Randomly selects an account from the pool for each request.
         """
         try:
-            meas: Measurement = self.inference_runner.run_inference(
-                experiment_id=self.experiment_id,
-                prompt=prompt,
-                max_tokens=self.max_tokens,
-            )
+            # Get a random account for this request
+            current_account_address, current_private_key = self._get_random_account()
+            
+            # If we have multiple accounts, use the persistent client manager for that account
+            if self.account_pool and len(self.account_pool) > 1:
+                # Use the persistent inference runner for this account
+                inference_runner = self._account_inference_runners[current_account_address]
+                meas: Measurement = inference_runner.run_inference(
+                    experiment_id=self.experiment_id,
+                    prompt=prompt,
+                    max_tokens=self.max_tokens,
+                )
+            else:
+                # Use shared client manager for single account
+                meas: Measurement = self.inference_runner.run_inference(
+                    experiment_id=self.experiment_id,
+                    prompt=prompt,
+                    max_tokens=self.max_tokens,
+                )
+            
             insert_measurement(meas)
+            
+            # Check if the measurement indicates a failed request
+            if meas.status == Status.FAILED:
+                logger.error(f"Request failed (HTTP/connection error) using account {current_account_address}, waiting 5 seconds before next attempt")
+                time.sleep(5.0)
+                
         except Exception as e:
-            logger.error(f"Inference task failed: {e}")
+            logger.error(f"Inference task failed with exception: {e}, waiting 5 seconds before next attempt")
+            time.sleep(5.0)
 
     def _metrics_loop(self):
         """
@@ -257,11 +339,17 @@ class ContinuousStressTestRunner:
             ("node_url", self.node_url),
             ("no_sign", str(self.no_sign)),
             ("old_sign", str(self.old_sign)),
-            ("client_architecture", "shared_pool"),  # Now using shared pool
+            ("client_architecture", "persistent_pool" if len(self.account_pool) > 1 else "shared_pool"),
+            ("account_random_selection_enabled", str(len(self.account_pool) > 1)),
+            ("account_pool_size", str(len(self.account_pool))),
         ]
 
         if self.account_address:
-            param_list.append(("account_address", self.account_address))
+            param_list.append(("initial_account_address", self.account_address))
+        if self.account_pool:
+            # Store all account addresses for reference
+            addresses = [account[0] for account in self.account_pool]
+            param_list.append(("account_pool_addresses", ",".join(addresses)))
         for k, v in param_list:
             p = Parameter(
                 id=None,

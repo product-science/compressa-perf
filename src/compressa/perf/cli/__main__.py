@@ -113,7 +113,8 @@ def run_continuous_stress_test_args(args):
         old_sign=args.old_sign,
         create_account_testnet=args.create_account_testnet,
         account_name=args.account_name,
-        inferenced_path=args.inferenced_path
+        inferenced_path=args.inferenced_path,
+        account_pool_size=args.account_pool_size
     )
 
 
@@ -128,74 +129,53 @@ def main():
     parser = argparse.ArgumentParser(
         description="CLI tool for running and analyzing experiments",
         epilog="""
-Examples:
-1. Run experiment with prompts from a file:
-    ```
+IMPORTANT EXAMPLES (most common use cases):
+
+1. Quick testnet experiment with generated prompts (RECOMMENDED FOR TESTING):
     compressa-perf measure \\
-        --node_url http://example.node.url:8545 \\
-        --model_name Qwen/Qwen2.5-7B-Instruct \\
-        --account_address 0x1234567890abcdef1234567890abcdef12345678 \\
-        --private_key_hex 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef \\
-        --experiment_name "File Prompts Run" \\
-        --prompts_file resources/prompts.csv \\
-        --num_tasks 1000 \\
-        --num_runners 100
-    ```
-2. Run experiment with generated prompts:
-    ```
+        --node-url http://testnet.node.url:8545 \\
+        --model-name Qwen/Qwen2.5-7B-Instruct \\
+        --experiment-name "My Test Run" \\
+        --create-account-testnet \\
+        --generate-prompts \\
+        --num-tasks 10 \\
+        --num-runners 2
+
+2. Continuous stress test with account rotation (RECOMMENDED FOR LOAD TESTING):
+    compressa-perf stress \\
+        --node-url http://testnet.node.url:8545 \\
+        --model-name Qwen/Qwen2.5-7B-Instruct \\
+        --experiment-name "Stress Test" \\
+        --create-account-testnet \\
+        --account-pool-size 5 \\
+        --num-runners 20 \\
+        --generate-prompts \\
+        --report-freq-min 1
+
+3. Run multiple experiments from YAML config:
+    compressa-perf measure-from-yaml \\
+        --node-url http://testnet.node.url:8545 \\
+        --create-account-testnet \\
+        config.yml
+
+4. Check network participant balances:
+    compressa-perf check-balances --node-url http://testnet.node.url:8545
+
+OTHER EXAMPLES:
+
+5. Production experiment with existing credentials:
     compressa-perf measure \\
-        --node_url http://example.node.url:8545 \\
-        --model_name Qwen/Qwen2.5-7B-Instruct \\
-        --account_address 0x1234567890abcdef1234567890abcdef12345678 \\
-        --private_key_hex 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef \\
-        --experiment_name "Generated Prompts Run" \\
-        --num_tasks 2 \\
-        --num_runners 2 \\
-        --generate_prompts \\
-        --num_prompts 1000 \\
-        --prompt_length 5000
-    ```
+        --seed-url http://production.node.url:8545 \\
+        --model-name Qwen/Qwen2.5-7B-Instruct \\
+        --experiment-name "Production Test" \\
+        --account-address 0x1234... \\
+        --private-key-hex 0xabcd... \\
+        --prompts-file prompts.csv \\
+        --num-tasks 1000
 
-3. Run experiments from a YAML configuration file:
-    ```
-    compressa-perf measure-from-yaml \\
-        --private_key_hex 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef \\
-        config.yml
-    ```
-
-4. Run experiments from a YAML configuration file with overridden node_url:
-    ```
-    compressa-perf measure-from-yaml \\
-        --node_url http://override.node.url:8545 \\
-        --private_key_hex 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef \\
-        config.yml
-    ```
-
-5. Run experiments from a YAML configuration file with overridden model_name:
-    ```
-    compressa-perf measure-from-yaml \\
-        --model_name Qwen/Qwen2.5-14B-Instruct \\
-        --private_key_hex 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef \\
-        config.yml
-    ```
-
-6. Run experiments from a YAML configuration file with overridden account_address:
-    ```
-    compressa-perf measure-from-yaml \\
-        --account_address 0x9876543210abcdef9876543210abcdef98765432 \\
-        --private_key_hex 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef \\
-        config.yml
-    ```
-
-7. List all experiments:
-    ```
-    compressa-perf list
-    ```
-
-8. Generate a report for an experiment:
-    ```
+6. List experiments and generate reports:
+    compressa-perf list --show-metrics
     compressa-perf report <EXPERIMENT_ID>
-    ```
         """,
         formatter_class=argparse.RawTextHelpFormatter
     )
@@ -205,66 +185,110 @@ Examples:
         "measure",
         help="Run an experiment",
     )
+    # Core required parameters (most important)
+    parser_run.add_argument(
+        "--node_url", "--node-url", "--seed_url", "--seed-url", 
+        type=str, required=True, dest="node_url",
+        help="Node/seed URL for blockchain connection and testnet account creation"
+    )
+    parser_run.add_argument(
+        "--model_name", "--model-name", 
+        type=str, required=True, dest="model_name",
+        help="Model name (e.g., Qwen/Qwen2.5-7B-Instruct)"
+    )
+    parser_run.add_argument(
+        "--experiment_name", "--experiment-name", 
+        type=str, required=True, dest="experiment_name",
+        help="Name of the experiment"
+    )
+    
+    # Authentication options (high priority)
+    parser_run.add_argument(
+        "--account_address", "--account-address", 
+        type=str, required=False, dest="account_address",
+        help="Account address (not required if using --create-account-testnet)"
+    )
+    parser_run.add_argument(
+        "--private_key_hex", "--private-key-hex", 
+        type=str, required=False, dest="private_key_hex",
+        help="Private key hex (not required if using --create-account-testnet or --no-sign)"
+    )
+    parser_run.add_argument(
+        "--create-account-testnet", "--create_account_testnet", 
+        action="store_true", dest="create_account_testnet",
+        help="[TESTNET] Automatically create account and export key using node URL (recommended for testing)"
+    )
+    parser_run.add_argument(
+        "--account-name", "--account_name", 
+        type=str, required=False, dest="account_name",
+        help="Account name for testnet account creation (optional, defaults to 'testnetuser')"
+    )
+    parser_run.add_argument(
+        "--no-sign", "--no_sign", 
+        action="store_true", dest="no_sign",
+        help="Send requests without signing (for testing unsigned mode)"
+    )
+    
+    # Experiment configuration
+    parser_run.add_argument(
+        "--num_tasks", "--num-tasks", 
+        type=int, default=100, dest="num_tasks",
+        help="Number of requests to send (default: 100)"
+    )
+    parser_run.add_argument(
+        "--num_runners", "--num-runners", 
+        type=int, default=10, dest="num_runners",
+        help="Number of concurrent runners (default: 10)"
+    )
+    
+    # Advanced options (lower priority)
     parser_run.add_argument(
         "--db",
         type=str,
         default=DEFAULT_DB_PATH,
-        help="Path to the SQLite database",
+        help="Path to the SQLite database (default: compressa-perf-db.sqlite)",
     )
     parser_run.add_argument(
-        "--node_url", type=str, required=True, help="Node URL (used for blockchain connection and testnet account creation)"
+        "--description", 
+        type=str, 
+        help="Description of the experiment"
     )
     parser_run.add_argument(
-        "--model_name", type=str, required=True, help="Model name"
+        "--old-sign", "--old_sign", 
+        action="store_true", dest="old_sign",
+        help="Use legacy signing method for backward compatibility"
     )
     parser_run.add_argument(
-        "--account_address", type=str, required=False, help="Account address"
-    )
-    parser_run.add_argument(
-        "--private_key_hex", type=str, required=False, help="Private key hex"
-    )
-    parser_run.add_argument(
-        "--no-sign", action="store_true", help="Send requests without signing"
-    )
-    parser_run.add_argument(
-        "--old-sign", action="store_true", help="Use legacy signing method for backward compatibility"
-    )
-    parser_run.add_argument(
-        "--create-account-testnet", action="store_true", help="Automatically create account and export key for testnet using --node_url before running experiment"
-    )
-    parser_run.add_argument(
-        "--account-name", type=str, required=False, help="Account name for testnet account creation (optional if --create-account-testnet)"
-    )
-    parser_run.add_argument(
-        "--inferenced-path", type=str, default="./inferenced", help="Path to the inferenced binary (default: ./inferenced, fallback: inferenced in PATH)"
+        "--inferenced-path", "--inferenced_path", 
+        type=str, default="./inferenced", dest="inferenced_path",
+        help="Path to the inferenced binary (default: ./inferenced, fallback: inferenced in PATH)"
     )
 
+    # Prompt configuration (important for experiment setup)
     parser_run.add_argument(
-        "--experiment_name", type=str, required=True, help="Name of the experiment"
+        "--prompts_file", "--prompts-file", 
+        type=str, dest="prompts_file",
+        help="Path to file containing prompts (alternative to --generate-prompts)"
     )
     parser_run.add_argument(
-        "--description", type=str, help="Description of the experiment"
+        "--generate_prompts", "--generate-prompts", 
+        action="store_true", dest="generate_prompts",
+        help="Generate random prompts instead of using a file (recommended for testing)"
     )
     parser_run.add_argument(
-        "--prompts_file", type=str, help="Path to the file containing prompts (separated by newlines)"
+        "--num_prompts", "--num-prompts", 
+        type=int, default=100, dest="num_prompts",
+        help="Number of prompts to generate (if using --generate-prompts, default: 100)"
     )
     parser_run.add_argument(
-        "--num_tasks", type=int, default=100, help="Number of requests to send"
+        "--prompt_length", "--prompt-length", 
+        type=int, default=100, dest="prompt_length",
+        help="Length of each generated prompt (if using --generate-prompts, default: 100)"
     )
     parser_run.add_argument(
-        "--num_runners", type=int, default=10, help="Number of concurrent runners"
-    )
-    parser_run.add_argument(
-        "--generate_prompts", action="store_true", help="Generate random prompts instead of using a file"
-    )
-    parser_run.add_argument(
-        "--num_prompts", type=int, default=100, help="Number of prompts to generate (if --generate_prompts is used)"
-    )
-    parser_run.add_argument(
-        "--prompt_length", type=int, default=100, help="Length of each generated prompt (if --generate_prompts is used)"
-    )
-    parser_run.add_argument(
-        "--max_tokens", type=int, default=1000, help="Maximum number of tokens for the model to generate"
+        "--max_tokens", "--max-tokens", 
+        type=int, default=1000, dest="max_tokens",
+        help="Maximum tokens for model to generate (default: 1000)"
     )
     parser_run.set_defaults(func=run_experiment_args)
 
@@ -340,50 +364,61 @@ Examples:
         "yaml_file",
         help="YAML configuration file for experiments",
     )
+    # Override parameters (most important)
+    parser_yaml.add_argument(
+        "--node_url", "--node-url", "--seed_url", "--seed-url",
+        type=str, required=False, dest="node_url",
+        help="Node/seed URL (overrides value in YAML config if provided)",
+    )
+    parser_yaml.add_argument(
+        "--model_name", "--model-name",
+        type=str, required=False, dest="model_name",
+        help="Model name (overrides value in YAML config if provided)",
+    )
+    parser_yaml.add_argument(
+        "--account_address", "--account-address",
+        type=str, required=False, dest="account_address",
+        help="Account address (overrides value in YAML config if provided)",
+    )
+    parser_yaml.add_argument(
+        "--private_key_hex", "--private-key-hex",
+        type=str, required=False, dest="private_key_hex",
+        help="Private key hex (required if not using --create-account-testnet or --no-sign)",
+    )
+    
+    # Authentication options
+    parser_yaml.add_argument(
+        "--create-account-testnet", "--create_account_testnet", 
+        action="store_true", dest="create_account_testnet",
+        help="[TESTNET] Automatically create account and export key using node URL (recommended for testing)"
+    )
+    parser_yaml.add_argument(
+        "--account-name", "--account_name", 
+        type=str, required=False, dest="account_name",
+        help="Account name for testnet account creation (optional, defaults to 'testnetuser')"
+    )
+    parser_yaml.add_argument(
+        "--no-sign", "--no_sign", 
+        action="store_true", dest="no_sign",
+        help="Send requests without signing (for testing unsigned mode)"
+    )
+    
+    # Advanced options (lower priority)
     parser_yaml.add_argument(
         "--db",
         type=str,
         default=DEFAULT_DB_PATH,
-        help="Path to the SQLite database",
+        help="Path to the SQLite database (default: compressa-perf-db.sqlite)",
     )
     parser_yaml.add_argument(
-        "--node_url",
-        type=str,
-        required=False,
-        help="Node URL (overrides value in config.yml if provided)",
+        "--old-sign", "--old_sign", 
+        action="store_true", dest="old_sign",
+        help="Use legacy signing method for backward compatibility"
     )
     parser_yaml.add_argument(
-        "--account_address",
-        type=str,
-        required=False,
-        help="Account address (overrides value in config.yml if provided)",
-    )
-    parser_yaml.add_argument(
-        "--model_name",
-        type=str,
-        required=False,
-        help="Model name (overrides value in config.yml if provided)",
-    )
-    parser_yaml.add_argument(
-        "--private_key_hex",
-        type=str,
-        required=False,
-        help="Private key hex",
-    )
-    parser_yaml.add_argument(
-        "--no-sign", action="store_true", help="Send requests without signing"
-    )
-    parser_yaml.add_argument(
-        "--old-sign", action="store_true", help="Use legacy signing method for backward compatibility"
-    )
-    parser_yaml.add_argument(
-        "--create-account-testnet", action="store_true", help="Automatically create account and export key for testnet using --node_url before running experiment"
-    )
-    parser_yaml.add_argument(
-        "--account-name", type=str, required=False, help="Account name for testnet account creation (optional if --create-account-testnet)"
-    )
-    parser_yaml.add_argument(
-        "--inferenced-path", type=str, default="./inferenced", help="Path to the inferenced binary (default: ./inferenced, fallback: inferenced in PATH)"
+        "--inferenced-path", "--inferenced_path", 
+        type=str, default="./inferenced", dest="inferenced_path",
+        help="Path to the inferenced binary (default: ./inferenced, fallback: inferenced in PATH)"
     )
 
     parser_yaml.set_defaults(func=run_experiments_from_yaml_args)
@@ -392,66 +427,115 @@ Examples:
         "stress",
         help="Run a continuous stress test (infinite requests, windowed metrics).",
     )
+    # Core required parameters (most important)
+    parser_stress.add_argument(
+        "--node_url", "--node-url", "--seed_url", "--seed-url", 
+        type=str, required=True, dest="node_url",
+        help="Node/seed URL for blockchain connection and testnet account creation"
+    )
+    parser_stress.add_argument(
+        "--model_name", "--model-name", 
+        type=str, required=True, dest="model_name",
+        help="Model name (e.g., Qwen/Qwen2.5-7B-Instruct)"
+    )
+    parser_stress.add_argument(
+        "--experiment_name", "--experiment-name", 
+        type=str, required=True, dest="experiment_name",
+        help="Name of the stress test experiment"
+    )
+    
+    # Stress test specific (high priority)
+    parser_stress.add_argument(
+        "--num_runners", "--num-runners", 
+        type=int, default=10, dest="num_runners",
+        help="Number of concurrent runners for stress test (default: 10)"
+    )
+    parser_stress.add_argument(
+        "--report_freq_min", "--report-freq-min", 
+        type=float, default=1, dest="report_freq_min",
+        help="Report frequency in minutes for windowed metrics (default: 1)"
+    )
+    parser_stress.add_argument(
+        "--account-pool-size", "--account_pool_size", 
+        type=int, default=1, dest="account_pool_size",
+        help="[ADVANCED] Number of accounts for random selection to avoid rate limiting (default: 1, set >1 to enable rotation)"
+    )
+    
+    # Authentication options (high priority)
+    parser_stress.add_argument(
+        "--account_address", "--account-address", 
+        type=str, required=False, dest="account_address",
+        help="Account address (not required if using --create-account-testnet)"
+    )
+    parser_stress.add_argument(
+        "--private_key_hex", "--private-key-hex", 
+        type=str, required=False, dest="private_key_hex",
+        help="Private key hex (not required if using --create-account-testnet or --no-sign)"
+    )
+    parser_stress.add_argument(
+        "--create-account-testnet", "--create_account_testnet", 
+        action="store_true", dest="create_account_testnet",
+        help="[TESTNET] Automatically create account(s) and export key using node URL (recommended for testing)"
+    )
+    parser_stress.add_argument(
+        "--account-name", "--account_name", 
+        type=str, required=False, dest="account_name",
+        help="Account name for testnet account creation (optional, defaults to 'stresstest')"
+    )
+    parser_stress.add_argument(
+        "--no-sign", "--no_sign", 
+        action="store_true", dest="no_sign",
+        help="Send requests without signing (for testing unsigned mode)"
+    )
+    
+    # Prompt configuration
+    parser_stress.add_argument(
+        "--prompts_file", "--prompts-file", 
+        type=str, dest="prompts_file",
+        help="File containing prompts (alternative to --generate-prompts)"
+    )
+    parser_stress.add_argument(
+        "--generate_prompts", "--generate-prompts", 
+        action="store_true", dest="generate_prompts",
+        help="Generate random prompts instead of using a file (recommended for testing)"
+    )
+    parser_stress.add_argument(
+        "--num_prompts", "--num-prompts", 
+        type=int, default=100, dest="num_prompts",
+        help="Number of prompts to generate (if using --generate-prompts, default: 100)"
+    )
+    parser_stress.add_argument(
+        "--prompt_length", "--prompt-length", 
+        type=int, default=100, dest="prompt_length",
+        help="Length of each generated prompt (if using --generate-prompts, default: 100)"
+    )
+    parser_stress.add_argument(
+        "--max_tokens", "--max-tokens", 
+        type=int, default=1000, dest="max_tokens",
+        help="Maximum tokens for generation (default: 1000)"
+    )
+    
+    # Advanced options (lower priority)
     parser_stress.add_argument(
         "--db",
         type=str,
         default=DEFAULT_DB_PATH,
-        help="Path to the SQLite database",
+        help="Path to the SQLite database (default: compressa-perf-db.sqlite)",
     )
     parser_stress.add_argument(
-        "--node_url", type=str, required=True, help="Node URL (used for blockchain connection and testnet account creation)"
+        "--description", 
+        type=str, 
+        help="Description of the stress test experiment"
     )
     parser_stress.add_argument(
-        "--model_name", type=str, required=True, help="Model name"
+        "--old-sign", "--old_sign", 
+        action="store_true", dest="old_sign",
+        help="Use legacy signing method for backward compatibility"
     )
     parser_stress.add_argument(
-        "--account_address", type=str, required=False, help="Account address"
-    )
-    parser_stress.add_argument(
-        "--private_key_hex", type=str, required=False, help="Private key hex"
-    )
-    parser_stress.add_argument(
-        "--no-sign", action="store_true", help="Send requests without signing"
-    )
-    parser_stress.add_argument(
-        "--old-sign", action="store_true", help="Use legacy signing method for backward compatibility"
-    )
-    parser_stress.add_argument(
-        "--create-account-testnet", action="store_true", help="Automatically create account and export key for testnet using --node_url before running experiment"
-    )
-    parser_stress.add_argument(
-        "--account-name", type=str, required=False, help="Account name for testnet account creation (optional if --create-account-testnet)"
-    )
-    parser_stress.add_argument(
-        "--inferenced-path", type=str, default="./inferenced", help="Path to the inferenced binary (default: ./inferenced, fallback: inferenced in PATH)"
-    )
-
-    parser_stress.add_argument(
-        "--experiment_name", type=str, required=True, help="Name of the experiment"
-    )
-    parser_stress.add_argument(
-        "--description", type=str, help="Description of the experiment"
-    )
-    parser_stress.add_argument(
-        "--prompts_file", type=str, help="File containing prompts"
-    )
-    parser_stress.add_argument(
-        "--num_runners", type=int, default=10, help="Number of concurrent runners"
-    )
-    parser_stress.add_argument(
-        "--generate_prompts", action="store_true", help="Generate random prompts instead of using a file"
-    )
-    parser_stress.add_argument(
-        "--num_prompts", type=int, default=100, help="Number of prompts to generate (if --generate_prompts)"
-    )
-    parser_stress.add_argument(
-        "--prompt_length", type=int, default=100, help="Length of each generated prompt (if --generate_prompts)"
-    )
-    parser_stress.add_argument(
-        "--max_tokens", type=int, default=1000, help="Maximum tokens for generation"
-    )
-    parser_stress.add_argument(
-        "--report_freq_min", type=float, default=1, help="Frequency (minutes) to compute windowed metrics"
+        "--inferenced-path", "--inferenced_path", 
+        type=str, default="./inferenced", dest="inferenced_path",
+        help="Path to the inferenced binary (default: ./inferenced, fallback: inferenced in PATH)"
     )
     parser_stress.set_defaults(func=run_continuous_stress_test_args)
 
@@ -460,10 +544,9 @@ Examples:
         help="Check the balance of the account on the specified node.",
     )
     parser_balances.add_argument(
-        "--node_url",
-        type=str,
-        required=True,
-        help="Node URL to check balance on.",
+        "--node_url", "--node-url", "--seed_url", "--seed-url",
+        type=str, required=True, dest="node_url",
+        help="Node/seed URL to check participant balances on",
     )
     parser_balances.set_defaults(func=check_balances_args)
 

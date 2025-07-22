@@ -37,6 +37,34 @@ For a quick test run, you can use these commands:
     config.yml
 ```
 
+### Option 3: Continuous stress test with testnet account creation
+
+```bash
+❯ export SEED_URL=http://36.189.234.237:19252/
+❯ export MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
+
+❯ compressa-perf stress \
+    --node_url "$SEED_URL" \
+    --model_name "$MODEL_NAME" \
+    --create-account-testnet \
+    --inferenced-path ./inferenced \
+    --experiment_name "stress_test" \
+    --generate_prompts \
+    --num_prompts 200 \
+    --prompt_length 10000 \
+    --num_runners 20 \
+    --max_tokens 300 \
+    --report_freq_min 1 \
+    --account-pool-size 10
+```
+
+This option runs a continuous stress test that:
+- Sends infinite requests with windowed metrics reporting every minute
+- Uses the same testnet setup as Option 1
+- **Random account selection**: Set `--account-pool-size` > 1 to randomly pick from multiple accounts
+- Press `Ctrl+C` to stop and view final results
+- Metrics are stored in the database for later analysis
+
 ## Installation
 
 Install from the repository (recommended for latest features and development):
@@ -215,11 +243,15 @@ You can also use testnet account creation with the stress test:
     --num_runners 10 \
     --report_freq_min 1 \
     --generate_prompts \
+    [--account-pool-size 10] \
     [--inferenced-path ./inferenced] [--db path/to/your.sqlite]
 ```
 
 Features:
 - This command will run an infinite stress test, periodically reporting windowed metrics (TTFT, latency, throughput, etc.)
+- **Random account selection**: Randomly picks from multiple accounts for each request to avoid rate limiting
+  - `--account-pool-size`: Number of accounts to create (default: 1, set >1 to enable random selection)
+  - **Persistent connections**: Each account maintains its own optimized HTTP connection pool
 - Use `Ctrl+C` to stop. Metrics are stored in the database (default: `compressa-perf-db.sqlite`)
 - Full parameter list: `compressa-perf stress -h`
 

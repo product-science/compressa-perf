@@ -128,6 +128,63 @@ def _create_testnet_account(
     
     return account_address, private_key_hex
 
+
+def _create_testnet_account_pool(
+    account_pool_size: int,
+    base_account_name: str,
+    seed_url: str,
+    inferenced_path: str = "./inferenced"
+) -> List[Tuple[str, str]]:
+    """
+    Create a pool of testnet accounts for rotation.
+    
+    Args:
+        account_pool_size: Number of accounts to create
+        base_account_name: Base name for accounts (will be suffixed with numbers)
+        seed_url: Seed node URL for testnet
+        inferenced_path: Path to the inferenced binary
+        
+    Returns:
+        List of (account_address, private_key_hex) tuples
+        
+    Raises:
+        ValueError: If account creation fails
+    """
+    if account_pool_size <= 0:
+        raise ValueError("account_pool_size must be greater than 0")
+    
+    print(f"[Account Pool] Creating {account_pool_size} accounts for rotation...")
+    accounts = []
+    
+    for i in range(account_pool_size):
+        account_name = f"{base_account_name}_{i:03d}"  # e.g. "stress_000", "stress_001"
+        try:
+            account_address, private_key_hex = _create_testnet_account(
+                account_name=account_name,
+                seed_url=seed_url,
+                inferenced_path=inferenced_path
+            )
+            accounts.append((account_address, private_key_hex))
+            print(f"[Account Pool] Created account {i+1}/{account_pool_size}: {account_address}")
+            
+            # Wait after the last account to ensure all accounts are ready
+            if i == account_pool_size - 1:  # Sleep only after the last account
+                print("[Account Pool] Waiting for all accounts to be ready...")
+                time.sleep(5)
+                
+        except Exception as e:
+            logger = get_logger(__name__)
+            logger.error(f"Failed to create account {account_name}: {e}")
+            # Continue trying to create other accounts
+            continue
+    
+    if not accounts:
+        raise ValueError("Failed to create any accounts")
+    
+    print(f"[Account Pool] Successfully created {len(accounts)} accounts")
+    return accounts
+
+
 logger = get_logger(__name__)
 
 
@@ -554,15 +611,31 @@ def run_continuous_stress_test(
     create_account_testnet: bool = False,
     account_name: str = None,
     inferenced_path: str = "./inferenced",
+    account_pool_size: int = 1,
     **kwargs
 ):
+    # Handle account creation/rotation
+    account_pool = None
     if create_account_testnet:
-        account_name = account_name or "testnetuser"
-        account_address, private_key_hex = _create_testnet_account(
-            account_name=account_name,
-            seed_url=node_url,
-            inferenced_path=inferenced_path
-        )
+        account_name = account_name or "stresstest"
+        if account_pool_size > 1:
+            # Create pool of accounts for random selection
+            print(f"[Account Pool] Creating {account_pool_size} accounts for random selection")
+            account_pool = _create_testnet_account_pool(
+                account_pool_size=account_pool_size,
+                base_account_name=account_name,
+                seed_url=node_url,
+                inferenced_path=inferenced_path
+            )
+            # Use the first account initially
+            account_address, private_key_hex = account_pool[0]
+        else:
+            # Create single account (default behavior)
+            account_address, private_key_hex = _create_testnet_account(
+                account_name=account_name,
+                seed_url=node_url,
+                inferenced_path=inferenced_path
+            )
     """
     Creates an Experiment, loads or generates prompts, and starts
     an infinite stress test that computes windowed metrics in real time.
@@ -611,6 +684,7 @@ def run_continuous_stress_test(
             report_freq_min=report_freq_min,
             no_sign=no_sign,
             old_sign=old_sign,
+            account_pool=account_pool,
         )
         runner.start_test()
 
