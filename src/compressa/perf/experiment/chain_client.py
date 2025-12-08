@@ -143,8 +143,17 @@ class _NodeClient:
         """Return a *low‑s* canonical ECDSA signature encoded in base‑64."""
         signature_bytes = payload
         if timestamp > 0:
-            signature_bytes += str(timestamp).encode('utf-8')
-        signature_bytes += transfer_address.encode('utf-8')
+            try:
+                signature_bytes += str(timestamp).encode('utf-8')
+            except Exception as e:
+                logger.error(f"Error encoding timestamp: {e}")
+        if transfer_address is None:
+            logger.warning("Transfer address is None, using entrypoint address")
+        try:
+            signature_bytes += transfer_address.encode('utf-8')
+        except Exception as e:
+            logger.error(f"Error encoding transfer address: {e}")
+            signature_bytes += self.entrypoint_addr.encode('utf-8')
         
         # Debug logging
         logger.debug(f"Signature components:")
@@ -228,7 +237,11 @@ class _NodeClient:
             },
             "_nonce": str(int.from_bytes(os.urandom(4), "big"))
         }
-        payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
+        try:
+            payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
+        except Exception as e:
+            logger.error(f"Error encoding payload: {e}")
+            raise
 
         headers = {
             "Content-Type": "application/json",
