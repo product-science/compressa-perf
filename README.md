@@ -10,7 +10,7 @@ For a quick test run, you can use these commands:
 ### Option 1: Direct measurement with testnet account creation
 
 ```bash
-❯ export SEED_URL=http://36.189.234.237:19252/
+❯ export SEED_URL=http://36.189.234.237:19252
 ❯ export MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
 
 ❯ compressa-perf measure \
@@ -40,7 +40,7 @@ For a quick test run, you can use these commands:
 ### Option 3: Continuous stress test with testnet account creation
 
 ```bash
-❯ export SEED_URL=http://36.189.234.237:19252/
+❯ export SEED_URL=http://36.189.234.237:19252
 ❯ export MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
 
 ❯ compressa-perf stress \
@@ -70,15 +70,9 @@ This option runs a continuous stress test that:
 Install from the repository (recommended for latest features and development):
 
 ```bash
-git clone https://github.com/compressa-ai/compressa-perf.git
+git clone git@github.com:product-science/compressa-perf.git
 cd compressa-perf
-poetry install
-```
-
-Or install the latest release from PyPI:
-
-```bash
-pip install compressa-perf
+pip install -e .
 ```
 
 ## Usage
