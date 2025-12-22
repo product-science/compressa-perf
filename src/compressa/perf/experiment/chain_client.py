@@ -141,19 +141,27 @@ class _NodeClient:
     # ---------------------------------------------------------------------
     def _sign(self, payload: bytes, timestamp: int, transfer_address: str) -> str:
         """Return a *low‑s* canonical ECDSA signature encoded in base‑64."""
-        signature_bytes = payload
+        # Phase 3: Sign hash of payload instead of raw payload
+        payload_hash = hashlib.sha256(payload).hexdigest()
+        
+        # Build signature input: hash + timestamp + transfer_address
+        signature_input = payload_hash
         if timestamp > 0:
-            signature_bytes += str(timestamp).encode('utf-8')
-        signature_bytes += transfer_address.encode('utf-8')
+            signature_input += str(timestamp)
+        if transfer_address:
+            signature_input += transfer_address
+        else:
+            logger.warning("Transfer address is None, using entrypoint address")
+            signature_input += self.entrypoint_addr
+        
+        signature_bytes = signature_input.encode('utf-8')
         
         # Debug logging
-        logger.debug(f"Signature components:")
-        logger.debug(f"  Payload length: {len(payload)}")
-        logger.debug(f"  Payload (first 100 chars): {payload[:100]}")
+        logger.debug(f"Signature components (Phase 3 - hash-based):")
+        logger.debug(f"  Payload hash: {payload_hash}")
         logger.debug(f"  Timestamp: {timestamp}")
         logger.debug(f"  Transfer address: {transfer_address}")
-        logger.debug(f"  Combined signature bytes length: {len(signature_bytes)}")
-        logger.debug(f"  Combined signature bytes (first 200 chars): {signature_bytes[:200]}")
+        logger.debug(f"  Signature input: {signature_input}")
         
         raw_sig = self._signing_key.sign_deterministic(
             signature_bytes, hashfunc=hashlib.sha256, sigencode=util.sigencode_string
@@ -228,7 +236,11 @@ class _NodeClient:
             },
             "_nonce": str(int.from_bytes(os.urandom(4), "big"))
         }
-        payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
+        try:
+            payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
+        except Exception as e:
+            logger.error(f"Error encoding payload: {e}")
+            raise
 
         headers = {
             "Content-Type": "application/json",
