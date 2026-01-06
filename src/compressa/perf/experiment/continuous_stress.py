@@ -1,15 +1,18 @@
 # File: compressa/perf/experiment/continuous_stress.py
 
+import socket
+from urllib.parse import urlparse
 import time
 import threading
 import random
 import sqlite3
+import queue
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 from datetime import datetime
 
 from compressa.perf.experiment.inference import InferenceRunner
-from compressa.perf.experiment.chain_client import OptimizedNodeClientManager
+from compressa.perf.experiment.chain_client import get_entrypoint_addr
 from compressa.perf.experiment.analysis import Analyzer
 from compressa.perf.data.models import (
     Measurement,
@@ -70,53 +73,62 @@ class ContinuousStressTestRunner:
         # Account pool setup for random selection
         self.account_pool = account_pool or []
         
-        # Create client managers for each account in the pool
-        self._account_client_managers = {}
-        self._account_inference_runners = {}
+        # Initialize runners pool
+        self.runners = []
+        self.runner_queue = queue.Queue()
         
-        if self.account_pool and len(self.account_pool) > 1:
-            # Create persistent client managers for each account
-            num_clients = min(5, max(2, num_runners // 10))  # Fewer clients per account
-            max_connections_per_client = 20  # Fewer connections per client
+        # 0. Resolve Node URL to IP to prevent DNS exhaustion
+        resolved_node_url = self.node_url
+        try:
+            parsed = urlparse(self.node_url)
+            if parsed.hostname:
+                ip_addr = socket.gethostbyname(parsed.hostname)
+                # Reconstruct URL with IP
+                new_netloc = f"{ip_addr}:{parsed.port}" if parsed.port else ip_addr
+                resolved_node_url = parsed._replace(netloc=new_netloc).geturl()
+                logger.info(f"Resolved {self.node_url} to {resolved_node_url} to bypass DNS")
+        except Exception as e:
+            logger.warning(f"Failed to resolve node URL to IP: {e}")
+
+        # Resolve entrypoint address once
+        self.entrypoint_addr = ""
+        if not self.no_sign:
+            logger.info("Resolving entrypoint address...")
+            try:
+                self.entrypoint_addr = get_entrypoint_addr(self.node_url)
+                logger.info(f"Entrypoint address: {self.entrypoint_addr}")
+            except Exception as e:
+                logger.warning(f"Failed to resolve entrypoint address: {e}")
+
+        # Create independent runners
+        logger.info(f"Creating {num_runners} independent runners for continuous stress test")
+        
+        for i in range(num_runners):
+            # Determine account for this runner
+            if self.account_pool and len(self.account_pool) > 0:
+                # Round-robin assignment of accounts to runners
+                acc_addr, acc_key = self.account_pool[i % len(self.account_pool)]
+            else:
+                acc_addr, acc_key = self.account_address, self.private_key_hex
             
-            logger.info(f"Creating {len(self.account_pool)} client managers for account pool with {num_clients} clients, {max_connections_per_client} connections each")
-            
-            for i, (acc_address, acc_private_key) in enumerate(self.account_pool):
-                client_manager = OptimizedNodeClientManager(
-                    node_url=node_url,
-                    account_address=acc_address,
-                    private_key_hex=acc_private_key,
+            try:
+                runner = InferenceRunner(
+                    node_url=resolved_node_url,  # USE IP-BASED URL
+                    entrypoint_addr=self.entrypoint_addr,
+                    model_name=model_name,
+                    account_address=acc_addr,
+                    private_key_hex=acc_key,
                     no_sign=no_sign,
                     old_sign=old_sign,
-                    num_clients=num_clients,
-                    max_connections_per_client=max_connections_per_client,
                 )
-                
-                inference_runner = InferenceRunner(
-                    shared_client_manager=client_manager,
-                    model_name=self.model_name,
-                )
-                
-                self._account_client_managers[acc_address] = client_manager
-                self._account_inference_runners[acc_address] = inference_runner
-                
-                logger.info(f"Created client manager {i+1}/{len(self.account_pool)} for account {acc_address}")
-        else:
-            # Create single shared client manager for single account
-            num_clients = min(10, max(3, num_runners // 20))  # 3-10 clients based on runner count
-            max_connections_per_client = 50
-            
-            logger.info(f"Creating shared client manager with {num_clients} clients, {max_connections_per_client} connections each for {num_runners} runners")
-            
-            self._shared_client_manager = OptimizedNodeClientManager(
-                node_url=node_url,
-                account_address=account_address,
-                private_key_hex=private_key_hex,
-                no_sign=no_sign,
-                old_sign=old_sign,
-                num_clients=num_clients,
-                max_connections_per_client=max_connections_per_client,
-            )
+                self.runners.append(runner)
+                self.runner_queue.put(runner)
+            except Exception as e:
+                logger.error(f"Failed to create runner {i}: {e}")
+                # Clean up already created runners
+                for r in self.runners:
+                    r.close()
+                raise
 
     def start_test(self):
         """
@@ -126,13 +138,6 @@ class ContinuousStressTestRunner:
         """
         self.executor = ThreadPoolExecutor(max_workers=self.num_runners)
         
-        # Create inference runner with shared client manager (only for single account mode)
-        if not (self.account_pool and len(self.account_pool) > 1):
-            self.inference_runner = InferenceRunner(
-                shared_client_manager=self._shared_client_manager,
-                model_name=self.model_name,
-            )
-
         self._store_continuous_params()
 
         t_infer = threading.Thread(
@@ -158,30 +163,9 @@ class ContinuousStressTestRunner:
             self.running = False
             self.executor.shutdown(wait=False)
             # Clean up resources
-            if hasattr(self, '_shared_client_manager'):
-                self._shared_client_manager.close_all()
-            if hasattr(self, '_account_client_managers'):
-                for client_manager in self._account_client_managers.values():
-                    client_manager.close_all()
+            for runner in self.runners:
+                runner.close()
     
-    def _get_random_account(self) -> Tuple[str, str]:
-        """
-        Get a random account from the pool.
-        If no pool exists, return the default account.
-        Thread-safe.
-        """
-        if self.account_pool and len(self.account_pool) > 1:
-            # Return a random account from the pool
-            return self.choice_generator.choice(self.account_pool)
-        elif self.account_pool and len(self.account_pool) == 1:
-            # Single account in pool
-            return self.account_pool[0]
-        else:
-            # No pool, use default account
-            return self.account_address, self.private_key_hex
-    
-
-
     def _continuous_inference_loop(self):
         """
         Continuously schedule inference tasks in the thread pool.
@@ -196,39 +180,37 @@ class ContinuousStressTestRunner:
         """
         Single inference call. Stores the resulting measurement to DB.
         If the request fails, waits 5 seconds before allowing the thread to continue.
-        Randomly selects an account from the pool for each request.
         """
+        runner = None
         try:
-            # Get a random account for this request
-            current_account_address, current_private_key = self._get_random_account()
-            
-            # If we have multiple accounts, use the persistent client manager for that account
-            if self.account_pool and len(self.account_pool) > 1:
-                # Use the persistent inference runner for this account
-                inference_runner = self._account_inference_runners[current_account_address]
-                meas: Measurement = inference_runner.run_inference(
-                    experiment_id=self.experiment_id,
-                    prompt=prompt,
-                    max_tokens=self.max_tokens,
-                )
-            else:
-                # Use shared client manager for single account
-                meas: Measurement = self.inference_runner.run_inference(
-                    experiment_id=self.experiment_id,
-                    prompt=prompt,
-                    max_tokens=self.max_tokens,
-                )
+            # Get an available runner from the queue (blocks until one is free)
+            try:
+                runner = self.runner_queue.get(timeout=10.0)
+            except queue.Empty:
+                logger.warning("Timed out waiting for a runner (all busy?)")
+                return
+
+            meas: Measurement = runner.run_inference(
+                experiment_id=self.experiment_id,
+                prompt=prompt,
+                max_tokens=self.max_tokens,
+            )
             
             insert_measurement(meas)
             
             # Check if the measurement indicates a failed request
             if meas.status == Status.FAILED:
-                logger.error(f"Request failed (HTTP/connection error) using account {current_account_address}, waiting 5 seconds before next attempt")
-                time.sleep(5.0)
+                # logger.error("Request failed")
+                # Add back off or just log?
+                pass
                 
         except Exception as e:
-            logger.error(f"Inference task failed with exception: {e}, waiting 5 seconds before next attempt")
-            time.sleep(5.0)
+            logger.error(f"Inference task failed with exception: {e}")
+            time.sleep(1.0)
+        finally:
+            # Return runner to the queue so it can be reused
+            if runner:
+                self.runner_queue.put(runner)
 
     def _metrics_loop(self):
         """
@@ -339,7 +321,7 @@ class ContinuousStressTestRunner:
             ("node_url", self.node_url),
             ("no_sign", str(self.no_sign)),
             ("old_sign", str(self.old_sign)),
-            ("client_architecture", "persistent_pool" if len(self.account_pool) > 1 else "shared_pool"),
+            ("client_architecture", "independent_runner_pool"),
             ("account_random_selection_enabled", str(len(self.account_pool) > 1)),
             ("account_pool_size", str(len(self.account_pool))),
         ]

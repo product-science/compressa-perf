@@ -8,6 +8,7 @@ import contextlib
 import os
 import resource
 import uuid
+import threading
 from urllib.parse import urlparse
 
 import requests
@@ -66,22 +67,25 @@ class _NodeClient:
     def __init__(
         self,
         node_url: str,
+        entrypoint_addr: str = "",
         account_address: str = None,
         private_key_hex: str = None,
         timeout: float = 600.0,
-        max_connections: int = 100,  # Reduced from 1000
-        max_connections_per_host: int = 100,  # Reduced from 1000  
+        max_connections: int = 10,  # Small pool per runner
+        max_connections_per_host: int = 10,
         max_retries: int = 3,
         backoff_factor: float = 0.5,
         no_sign: bool = False,
         old_sign: bool = False,
+        host_header: str = None,
     ) -> None:
         self.node_url = node_url.rstrip("/")
         self.account_address = account_address
         self.timeout = timeout
         self.no_sign = no_sign
         self.old_sign = old_sign
-        self.entrypoint_addr = get_entrypoint_addr(node_url) if not no_sign else ""
+        self.entrypoint_addr = entrypoint_addr
+        self.host_header = host_header
 
         # Check system limits on first initialization
         if not hasattr(_NodeClient, '_limits_checked'):
@@ -121,6 +125,10 @@ class _NodeClient:
             'Connection': 'keep-alive',
             'Keep-Alive': 'timeout=30, max=1000'
         })
+        
+        # Override Host header if provided (critical when using IP address for connection)
+        if self.host_header:
+            self._session.headers['Host'] = self.host_header
 
     def __enter__(self):
         return self
@@ -134,7 +142,8 @@ class _NodeClient:
             try:
                 self._session.close()
             except Exception as e:
-                logger.debug(f"Error closing session: {e}")
+                logger.debug("Error closing session: %s", e)
+
 
     # ---------------------------------------------------------------------
     # Internal helpers
@@ -225,125 +234,72 @@ class _NodeClient:
         temperature: float = 0.8,
     ):
         """Send a streaming chat/completions request and return the raw response."""
-        payload = {
-            "temperature": temperature,
-            "model": model,
-            "messages": messages,
-            "stream": True,
-            "max_tokens": max_tokens,
-            "stream_options": {
-                "include_usage": True
-            },
-            "_nonce": str(int.from_bytes(os.urandom(4), "big"))
-        }
+        
         try:
-            payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
-        except Exception as e:
-            logger.error(f"Error encoding payload: {e}")
+            payload = {
+                "temperature": temperature,
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                "max_tokens": max_tokens,
+                "stream_options": {
+                    "include_usage": True
+                },
+                "_nonce": str(int.from_bytes(os.urandom(4), "big"))
+            }
+            try:
+                payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
+            except Exception as e:
+                logger.error("Error encoding payload: %s", e)
+                raise
+
+            headers = {
+                "Content-Type": "application/json",
+            }
+
+            if not self.no_sign:
+                timestamp_ns = int(time.time_ns())
+                
+                transfer_address = self.entrypoint_addr
+                
+                if self.old_sign:
+                    headers["Authorization"] = self._old_sign(payload_bytes)
+                else:
+                    headers["Authorization"] = self._sign(payload_bytes, timestamp_ns, transfer_address)
+                headers["X-Requester-Address"] = self.account_address
+                headers["X-Timestamp"] = str(timestamp_ns)
+
+            resp = self._session.post(
+                f"{self.node_url}/v1/chat/completions",
+                data=payload_bytes,
+                headers=headers,
+                stream=True,
+                timeout=self.timeout,
+            )
+            
+            # Handle HTTP errors with detailed error messages
+            if resp.status_code >= 400:
+                error_message = "Unknown error"
+                try:
+                    # Read content first while response is still open
+                    content = resp.content
+                    try:
+                        error_data = json.loads(content)
+                        error_message = error_data.get("error", "Unknown error")
+                    except:
+                        error_message = content.decode('utf-8', errors='replace')
+                except Exception as e:
+                    error_message = f"Could not read error body: {e}"
+                finally:
+                    resp.close()
+
+                logger.error("HTTP %s error: %s", resp.status_code, error_message)
+                raise requests.exceptions.HTTPError(f"HTTP {resp.status_code}: {error_message}", response=resp)
+            
+            return resp  # caller iterates resp.iter_lines(...)
+        except Exception:
             raise
 
-        headers = {
-            "Content-Type": "application/json",
-        }
-
-        if not self.no_sign:
-            timestamp_ns = int(time.time_ns())
-            
-            transfer_address = self.entrypoint_addr
-            
-            if self.old_sign:
-                headers["Authorization"] = self._old_sign(payload_bytes)
-            else:
-                headers["Authorization"] = self._sign(payload_bytes, timestamp_ns, transfer_address)
-            headers["X-Requester-Address"] = self.account_address
-            headers["X-Timestamp"] = str(timestamp_ns)
-
-        resp = self._session.post(
-            f"{self.node_url}/v1/chat/completions",
-            data=payload_bytes,
-            headers=headers,
-            stream=True,
-            timeout=self.timeout,
-        )
-        
-        # Handle HTTP errors with detailed error messages
-        if resp.status_code >= 400:
-            try:
-                # The server returns JSON errors in the format: {"error": "message"}
-                error_data = resp.json()
-                error_message = error_data.get("error", "Unknown error")
-                logger.error(f"HTTP {resp.status_code} error: {error_message}")
-                raise requests.exceptions.HTTPError(f"HTTP {resp.status_code}: {error_message}", response=resp)
-            except ValueError:
-                # If JSON parsing fails, try to read as text
-                try:
-                    error_text = resp.text
-                    logger.error(f"HTTP {resp.status_code} error: {error_text}")
-                    raise requests.exceptions.HTTPError(f"HTTP {resp.status_code}: {error_text}", response=resp)
-                except Exception:
-                    # If everything fails, use the status reason
-                    logger.error(f"HTTP {resp.status_code} error: {resp.reason}")
-                    resp.raise_for_status()
-        
-        return resp  # caller iterates resp.iter_lines(...)
-
-
-# ---------------------------------------------------------------------------
-# Optimized client manager for high-concurrency scenarios
-# ---------------------------------------------------------------------------
-class OptimizedNodeClientManager:
-    """
-    Manages a pool of _NodeClient instances to handle high-concurrency requests.
-    This helps distribute load across multiple connection pools.
-    """
-    
-    def __init__(
-        self,
-        node_url: str,
-        account_address: str = None,
-        private_key_hex: str = None,
-        timeout: float = 600.0,
-        num_clients: int = 5,  # Reduced from 10
-        max_connections_per_client: int = 50,  # Reduced from 500
-        no_sign: bool = False,
-        old_sign: bool = False,
-    ):
-        self.clients = []
-        self.current_client_index = 0
-        
-        logger.info(f"Creating {num_clients} optimized HTTP clients with {max_connections_per_client} connections each")
-        
-        for _ in range(num_clients):
-            client = _NodeClient(
-                node_url=node_url,
-                account_address=account_address,
-                private_key_hex=private_key_hex,
-                timeout=timeout,
-                max_connections=max_connections_per_client,
-                max_connections_per_host=max_connections_per_client,
-                max_retries=3,
-                backoff_factor=0.5,
-                no_sign=no_sign,
-                old_sign=old_sign,
-            )
-            self.clients.append(client)
-    
-    def get_client(self) -> _NodeClient:
-        """Get the next client using round-robin selection"""
-        client = self.clients[self.current_client_index]
-        self.current_client_index = (self.current_client_index + 1) % len(self.clients)
-        return client
-    
-    def close_all(self):
-        """Close all clients"""
-        for client in self.clients:
-            client.close()
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close_all()
 
 
 # ---------------------------------------------------------------------------
@@ -363,4 +319,4 @@ def managed_stream_response(response):
             if hasattr(response, 'raw') and hasattr(response.raw, 'close'):
                 response.raw.close()
         except Exception as e:
-            logger.debug(f"Error during response cleanup: {e}")  # Don't fail on cleanup errors
+            logger.debug("Error during response cleanup: %s", e)  # Don't fail on cleanup errors

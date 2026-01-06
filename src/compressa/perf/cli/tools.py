@@ -267,6 +267,8 @@ def run_experiment(
     create_account_testnet: bool = False,
     account_name: str = None,
     inferenced_path: str = "./inferenced",
+    rate_limit_requests: int = 100,
+    rate_limit_window: float = 5.0,
     **kwargs
 ):
     if create_account_testnet:
@@ -314,6 +316,7 @@ def run_experiment(
             prompts = read_prompts_from_file(prompts_file, prompt_length)
 
         logger.info(f"Num of prompts: {len(prompts)}\nNum of tasks: {num_tasks}\nNum of runners: {num_runners}\nMax tokens: {max_tokens}")
+        logger.info(f"Rate limit: {rate_limit_requests} requests per {rate_limit_window} seconds")
 
         experiment_runner.run_experiment(
             experiment_id=experiment.id,
@@ -321,6 +324,8 @@ def run_experiment(
             num_tasks=num_tasks,
             max_tokens=max_tokens,
             seed=seed,
+            rate_limit_requests=rate_limit_requests,
+            rate_limit_window=rate_limit_window,
         )
 
         db_writer.wait_for_write()

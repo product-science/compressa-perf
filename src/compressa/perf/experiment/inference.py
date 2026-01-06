@@ -19,40 +19,73 @@ from compressa.perf.db.operations import (
 from compressa.utils import get_logger, stream_chat
 from compressa.perf.experiment.chain_client import (
     _NodeClient,
-    OptimizedNodeClientManager,
+    get_entrypoint_addr,
     managed_stream_response,
 )
+from compressa.perf.experiment.utils import SlidingWindowRateLimiter
+
+import socket
+from urllib.parse import urlparse
 
 import sqlite3
 from concurrent.futures import (
     ThreadPoolExecutor,
     as_completed,
 )
+import queue
 import random
+import threading
 from tqdm import tqdm
 
 logger = get_logger(__name__)
 
 
+class CancelledError(Exception):
+    """Raised when a task is cancelled via the cancel_event."""
+    pass
+
+
 class InferenceRunner:
     def __init__(
         self,
-        shared_client_manager: OptimizedNodeClientManager,
+        node_url: str,
+        entrypoint_addr: str,
         model_name: str,
+        account_address: str = None,
+        private_key_hex: str = None,
+        no_sign: bool = False,
+        old_sign: bool = False,
+        host_header: str = None,
     ) -> None:
         self.model_name = model_name
-        self._shared_client_manager = shared_client_manager
+        
+        # Create private client for this runner
+        # We only need 1-2 connections per runner since it's single-threaded
+        self._client = _NodeClient(
+            node_url=node_url,
+            entrypoint_addr=entrypoint_addr,
+            account_address=account_address,
+            private_key_hex=private_key_hex,
+            timeout=600.0,
+            max_connections=2,  # Minimal pool for single thread
+            max_connections_per_host=2,
+            max_retries=3,
+            backoff_factor=0.5,
+            no_sign=no_sign,
+            old_sign=old_sign,
+            host_header=host_header,
+        )
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Don't close the shared client manager - it's owned by ExperimentRunner
-        pass
+        self.close()
 
     def close(self):
-        """No-op since we use shared client manager"""
-        pass
+        """Close the private client"""
+        if hasattr(self, '_client'):
+            self._client.close()
 
     # ---------------------------------------------------------------------
     # Public
@@ -62,7 +95,16 @@ class InferenceRunner:
         experiment_id: int,
         prompt: str,
         max_tokens: int,
+        cancel_event: threading.Event = None,
     ) -> Measurement:
+        # Check for cancellation before starting
+        if cancel_event and cancel_event.is_set():
+            raise CancelledError("Task cancelled before start")
+        
+        # Timing instrumentation
+        t0 = time.time()
+        timings = {}
+        
         start_time = time.time()
         first_token_time = -1.0
         ttft = 0.0
@@ -73,18 +115,31 @@ class InferenceRunner:
         status = Status.SUCCESS
 
         try:
-            # Get a client from the shared pool
-            client = self._shared_client_manager.get_client()
+            # Phase 1: Use private client (no contention)
+            client = self._client
+            timings['get_client'] = 0.0
             
+            # Phase 2: Send request
+            t1 = time.time()
             resp = client.stream_chat_completion(
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": "<INST>Repeat response in a loop, enumerate all the numbers from 1 to 1000 (YES 1000 FULL COPIES OF RESPONSE). We want to have long response to test the throughput of the server.</INST>"},
+                    {"role": "user", "content": prompt + "\n DON'T FORGET TO REPEAT THE RESPONSE 1000 TIMES IN A LOOP."}
+                ],
                 model=self.model_name,
                 max_tokens=max_tokens,
             )
+            timings['send_request'] = time.time() - t1
 
+            # Phase 3: Stream response
+            t2 = time.time()
             # Use context manager for proper resource cleanup
             with managed_stream_response(resp) as response:
                 for raw_line in response.iter_lines(decode_unicode=True):
+                    # Check for cancellation during streaming
+                    if cancel_event and cancel_event.is_set():
+                        raise CancelledError("Task cancelled during streaming")
+                    
                     if not raw_line:
                         continue
 
@@ -97,7 +152,7 @@ class InferenceRunner:
                     try:
                         chunk = json.loads(raw_line)
                     except json.JSONDecodeError:
-                        logger.warning(f"Failed to parse JSON: {raw_line}")
+                        logger.warning("Failed to parse JSON: %s", raw_line)
                         continue
 
                     usage = chunk.get("usage")
@@ -110,7 +165,8 @@ class InferenceRunner:
                         .get("delta", {})
                         .get("content") if chunk.get("choices") else None
                     )
-                    logger.debug(f"Delta: {delta}")
+                    # Lazy logging optimization
+                    # logger.debug("Delta: %s", delta) 
                     if delta is not None:
                         if first_token_time < 0:
                             first_token_time = time.time()
@@ -118,10 +174,24 @@ class InferenceRunner:
                         response_text += delta
                         n_chunks += 1
 
+            timings['stream_response'] = time.time() - t2
+
             if n_chunks == 0:
                 raise RuntimeError("No content chunks received – server returned empty stream")
 
             end_time = time.time()
+            timings['total'] = end_time - t0
+            
+            # Log timing breakdown
+            logger.debug(
+                "[Thread %s] Request timing: get_client=%.3fs, send=%.3fs, stream=%.3fs, total=%.3fs",
+                threading.current_thread().name,
+                timings['get_client'],
+                timings['send_request'],
+                timings['stream_response'],
+                timings['total']
+            )
+            
             logger.debug(
                 "Prompt:%s\nResponse text:%s\n%s",
                 prompt,
@@ -187,29 +257,14 @@ class ExperimentRunner:
         self.num_runners = num_runners
         self.no_sign = no_sign
         self.old_sign = old_sign
-        
-        # Create ONE shared client manager for all runners
-        # Scale clients based on number of runners
-        num_clients = min(10, max(3, num_runners // 20))  # 3-10 clients based on runner count
-        max_connections_per_client = 50
-        
-        logger.info(f"Creating shared client manager with {num_clients} clients, {max_connections_per_client} connections each for {num_runners} runners")
-        
-        self._shared_client_manager = OptimizedNodeClientManager(
-            node_url=node_url,
-            account_address=account_address,
-            private_key_hex=private_key_hex,
-            no_sign=no_sign,
-            old_sign=old_sign,
-            num_clients=num_clients,
-            max_connections_per_client=max_connections_per_client,
-        )
 
     def _store_experiment_parameters(
         self,
         experiment_id: int,
         num_tasks: int,
         max_tokens: int,
+        rate_limit_requests: int,
+        rate_limit_window: float,
     ) -> None:
         params = [
             ("num_workers", str(self.num_runners)),
@@ -219,7 +274,9 @@ class ExperimentRunner:
             ("model_name", self.model_name),
             ("no_sign", str(self.no_sign)),
             ("old_sign", str(self.old_sign)),
-            ("client_architecture", "shared_pool"),  # Now using shared pool
+            ("client_architecture", "independent_runners"),
+            ("rate_limit_requests", str(rate_limit_requests)),
+            ("rate_limit_window", str(rate_limit_window)),
         ]
 
         if self.account_address:
@@ -240,48 +297,175 @@ class ExperimentRunner:
         num_tasks: int = 100,
         max_tokens: int = 1000,
         seed: int = 42,
+        over_schedule_factor: float = 0.5,
+        rate_limit_requests: int = 100,
+        rate_limit_window: float = 5.0,
     ) -> None:
 
         rng = random.Random(seed)
         all_measurements: List[Measurement] = []
+        cancel_event = threading.Event()
 
-        # Create runners that share the same client manager
+        # Calculate buffer for over-scheduling to eliminate tail latency
+        buffer = max(self.num_runners, int(num_tasks * over_schedule_factor))
+        scheduled_tasks = num_tasks + buffer
+        logger.info(
+            "Over-scheduling: %d tasks (%d needed + %d buffer)",
+            scheduled_tasks, num_tasks, buffer
+        )
+
+        # 0. Resolve Node URL to IP to prevent DNS exhaustion
+        resolved_node_url = self.node_url
+        original_host_header = None
+        try:
+            parsed = urlparse(self.node_url)
+            if parsed.hostname:
+                original_host_header = f"{parsed.hostname}:{parsed.port}" if parsed.port else parsed.hostname
+                ip_addr = socket.gethostbyname(parsed.hostname)
+                # Reconstruct URL with IP
+                new_netloc = f"{ip_addr}:{parsed.port}" if parsed.port else ip_addr
+                resolved_node_url = parsed._replace(netloc=new_netloc).geturl()
+                logger.info("Resolved %s to %s to bypass DNS (Host: %s)", self.node_url, resolved_node_url, original_host_header)
+        except Exception as e:
+            logger.warning("Failed to resolve node URL to IP: %s", e)
+
+        # 1. Resolve entrypoint address ONCE
+        entrypoint_addr = ""
+        if not self.no_sign:
+            logger.info("Resolving entrypoint address...")
+            # Use original URL to be safe, or resolved? requests handles DNS fine for single request.
+            entrypoint_addr = get_entrypoint_addr(self.node_url)
+            logger.info("Entrypoint address: %s", entrypoint_addr)
+
+        # 2. Create independent runners
+        logger.info("Initializing %d independent runners...", self.num_runners)
         runners = []
-        for _ in range(self.num_runners):
-            runner = InferenceRunner(
-                shared_client_manager=self._shared_client_manager,
-                model_name=self.model_name,
-            )
-            runners.append(runner)
+        try:
+            for i in range(self.num_runners):
+                runner = InferenceRunner(
+                    node_url=resolved_node_url,  # USE IP-BASED URL
+                    entrypoint_addr=entrypoint_addr,
+                    model_name=self.model_name,
+                    account_address=self.account_address,
+                    private_key_hex=self.private_key_hex,
+                    no_sign=self.no_sign,
+                    old_sign=self.old_sign,
+                    host_header=original_host_header, # Pass Host header
+                )
+                runners.append(runner)
+        except Exception as e:
+            logger.error("Failed to initialize runners: %s", e)
+            for r in runners:
+                r.close()
+            raise
+
+        # Manual executor management for early shutdown control
+        executor = ThreadPoolExecutor(max_workers=self.num_runners)
 
         try:
-            with ThreadPoolExecutor(max_workers=self.num_runners) as pool:
-                futures = [
-                    pool.submit(
+            # Rate limiter to control request submission rate
+            rate_limiter = SlidingWindowRateLimiter(
+                max_requests=rate_limit_requests,
+                window_seconds=rate_limit_window,
+            )
+            logger.info(
+                "Rate limiting: max %d requests per %.1f seconds",
+                rate_limit_requests, rate_limit_window
+            )
+
+            # Thread-safe queue for futures
+            futures_queue = queue.Queue()
+            submission_done = threading.Event()
+
+            def submit_tasks():
+                """Background thread for rate-limited task submission."""
+                for i in range(scheduled_tasks):
+                    if cancel_event.is_set():
+                        break
+                    rate_limiter.acquire()
+                    future = executor.submit(
                         runners[i % self.num_runners].run_inference,
                         experiment_id,
                         rng.choice(prompts),
                         max_tokens,
+                        cancel_event,
                     )
-                    for i in range(num_tasks)
-                ]
+                    futures_queue.put(future)
+                submission_done.set()
 
-                for f in tqdm(as_completed(futures), total=num_tasks, desc="Running experiments"):
-                    try:
-                        all_measurements.append(f.result())
-                    except Exception as exc:
-                        logger.error("Task failed: %s", exc)
+            # Start background submission thread
+            submit_thread = threading.Thread(target=submit_tasks, daemon=True)
+            submit_thread.start()
+
+            # Track progress as results come in
+            pending_futures = []
+            with tqdm(total=num_tasks, desc="Running experiments") as pbar:
+                while len(all_measurements) < num_tasks:
+                    # Collect new futures from submission thread
+                    while True:
+                        try:
+                            f = futures_queue.get_nowait()
+                            pending_futures.append(f)
+                        except queue.Empty:
+                            break
+
+                    # Check if any futures are done
+                    still_pending = []
+                    for f in pending_futures:
+                        if f.done():
+                            try:
+                                measurement = f.result()
+                                all_measurements.append(measurement)
+                                pbar.update(1)
+                            except CancelledError:
+                                pass
+                            except Exception as exc:
+                                logger.error("Task failed: %s", exc)
+                        else:
+                            still_pending.append(f)
+                    pending_futures = still_pending
+
+                    # Exit if submission is done and no pending futures
+                    if submission_done.is_set() and not pending_futures:
+                        break
+
+                    # Small sleep to avoid busy-waiting
+                    time.sleep(0.01)
+
+            # Wait for submission thread to finish
+            submit_thread.join(timeout=1.0)
 
         finally:
-            # Close the shared client manager
-            self._shared_client_manager.close_all()
+            # Signal cancellation to running tasks
+            cancel_event.set()
+
+            # Cancel pending futures and shut down
+            # cancel_futures=True requires Python 3.9+
+            executor.shutdown(wait=False, cancel_futures=True)
+
+            # Log summary
+            logger.info("=" * 60)
+            logger.info("=== EXPERIMENT SUMMARY ===")
+            logger.info("=" * 60)
+            
+            # Experiment summary
+            logger.info("  Requested tasks: %d", num_tasks)
+            logger.info("  Scheduled tasks (with buffer): %d", scheduled_tasks)
+            logger.info("  Completed measurements: %d", len(all_measurements))
+            logger.info("  Num runners configured: %d", self.num_runners)
+            logger.info("=" * 60)
+            
+            # Clean up all clients
+            for runner in runners:
+                runner.close()
 
         # Persist metadata & results --------------------------------------
-        self._store_experiment_parameters(experiment_id, num_tasks, max_tokens)
-        for m in all_measurements:
+        self._store_experiment_parameters(
+            experiment_id, num_tasks, max_tokens,
+            rate_limit_requests, rate_limit_window
+        )
+        for m in all_measurements[:num_tasks]:
             insert_measurement(m)
 
-        logger.info(
-            "Number of failed measurements: %d",
-            len([m for m in all_measurements if m.status == Status.FAILED]),
-        )
+        failed_count = len([m for m in all_measurements if m.status == Status.FAILED])
+        logger.info("Number of failed measurements: %d", failed_count)
