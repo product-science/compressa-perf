@@ -298,7 +298,7 @@ class ExperimentRunner:
         max_tokens: int = 1000,
         seed: int = 42,
         over_schedule_factor: float = 0.5,
-        rate_limit_requests: int = 100,
+        rate_limit_requests: int = 500,
         rate_limit_window: float = 5.0,
     ) -> None:
 
