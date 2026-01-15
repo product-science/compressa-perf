@@ -316,24 +316,12 @@ class ExperimentRunner:
 
         # 0. Resolve Node URL to IP to prevent DNS exhaustion
         resolved_node_url = self.node_url
-        original_host_header = None
-        try:
-            parsed = urlparse(self.node_url)
-            if parsed.hostname:
-                original_host_header = f"{parsed.hostname}:{parsed.port}" if parsed.port else parsed.hostname
-                ip_addr = socket.gethostbyname(parsed.hostname)
-                # Reconstruct URL with IP
-                new_netloc = f"{ip_addr}:{parsed.port}" if parsed.port else ip_addr
-                resolved_node_url = parsed._replace(netloc=new_netloc).geturl()
-                logger.info("Resolved %s to %s to bypass DNS (Host: %s)", self.node_url, resolved_node_url, original_host_header)
-        except Exception as e:
-            logger.warning("Failed to resolve node URL to IP: %s", e)
+
 
         # 1. Resolve entrypoint address ONCE
         entrypoint_addr = ""
         if not self.no_sign:
             logger.info("Resolving entrypoint address...")
-            # Use original URL to be safe, or resolved? requests handles DNS fine for single request.
             entrypoint_addr = get_entrypoint_addr(self.node_url)
             logger.info("Entrypoint address: %s", entrypoint_addr)
 
@@ -350,7 +338,6 @@ class ExperimentRunner:
                     private_key_hex=self.private_key_hex,
                     no_sign=self.no_sign,
                     old_sign=self.old_sign,
-                    host_header=original_host_header, # Pass Host header
                 )
                 runners.append(runner)
         except Exception as e:
