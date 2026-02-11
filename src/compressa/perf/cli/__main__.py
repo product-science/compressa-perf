@@ -49,7 +49,8 @@ def run_experiment_args(args):
         old_sign=args.old_sign,
         create_account_testnet=args.create_account_testnet,
         account_name=args.account_name,
-        inferenced_path=args.inferenced_path
+        inferenced_path=args.inferenced_path,
+        transfer_address=args.transfer_address
     )
 
 
@@ -85,7 +86,8 @@ def run_experiments_from_yaml_args(args):
         old_sign=args.old_sign,
         create_account_testnet=args.create_account_testnet,
         account_name=args.account_name,
-        inferenced_path=args.inferenced_path
+        inferenced_path=args.inferenced_path,
+        transfer_address=args.transfer_address
     )
 
 
@@ -114,7 +116,8 @@ def run_continuous_stress_test_args(args):
         create_account_testnet=args.create_account_testnet,
         account_name=args.account_name,
         inferenced_path=args.inferenced_path,
-        account_pool_size=args.account_pool_size
+        account_pool_size=args.account_pool_size,
+        transfer_address=args.transfer_address
     )
 
 
@@ -290,6 +293,11 @@ OTHER EXAMPLES:
         type=int, default=1000, dest="max_tokens",
         help="Maximum tokens for model to generate (default: 1000)"
     )
+    parser_run.add_argument(
+        "--transfer-address", "--transfer_address",
+        type=str, required=False, dest="transfer_address",
+        help="Transfer address for signing (if different from auto-resolved entrypoint address)"
+    )
     parser_run.set_defaults(func=run_experiment_args)
 
     parser_report = subparsers.add_parser(
@@ -420,6 +428,11 @@ OTHER EXAMPLES:
         type=str, default="./inferenced", dest="inferenced_path",
         help="Path to the inferenced binary (default: ./inferenced, fallback: inferenced in PATH)"
     )
+    parser_yaml.add_argument(
+        "--transfer-address", "--transfer_address",
+        type=str, required=False, dest="transfer_address",
+        help="Transfer address for signing (if different from auto-resolved entrypoint address)"
+    )
 
     parser_yaml.set_defaults(func=run_experiments_from_yaml_args)
 
@@ -536,6 +549,11 @@ OTHER EXAMPLES:
         "--inferenced-path", "--inferenced_path", 
         type=str, default="./inferenced", dest="inferenced_path",
         help="Path to the inferenced binary (default: ./inferenced, fallback: inferenced in PATH)"
+    )
+    parser_stress.add_argument(
+        "--transfer-address", "--transfer_address",
+        type=str, required=False, dest="transfer_address",
+        help="Transfer address for signing (if different from auto-resolved entrypoint address)"
     )
     parser_stress.set_defaults(func=run_continuous_stress_test_args)
 

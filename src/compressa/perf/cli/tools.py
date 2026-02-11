@@ -243,8 +243,9 @@ def generate_prompts_list(
     return prompts
 
 def read_prompts_from_file(file_path, prompt_length):
-    df = pd.read_csv(file_path, header=None)
-    return df[0].map(lambda x: x[:prompt_length]).tolist()
+    with open(file_path, 'r', encoding='utf-8') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    return [line[:prompt_length] for line in lines]
 
 def run_experiment(
     db: str = DEFAULT_DB_PATH,
@@ -269,6 +270,7 @@ def run_experiment(
     inferenced_path: str = "./inferenced",
     rate_limit_requests: int = 100,
     rate_limit_window: float = 5.0,
+    transfer_address: str = None,
     **kwargs
 ):
     if create_account_testnet:
@@ -299,6 +301,7 @@ def run_experiment(
             num_runners=num_runners,
             no_sign=no_sign,
             old_sign=old_sign,
+            transfer_address=transfer_address,
         )
 
         experiment = Experiment(
@@ -532,6 +535,7 @@ def run_experiments_from_yaml(
     create_account_testnet: bool = False,
     account_name: str = None,
     inferenced_path: str = "./inferenced",
+    transfer_address: str = None,
     **kwargs
 ):
     effective_account_address = account_address
@@ -590,6 +594,7 @@ def run_experiments_from_yaml(
             seed=config.seed,
             no_sign=no_sign,
             old_sign=old_sign,
+            transfer_address=transfer_address,
         )
 
     list_experiments(db=db)
@@ -617,6 +622,7 @@ def run_continuous_stress_test(
     account_name: str = None,
     inferenced_path: str = "./inferenced",
     account_pool_size: int = 1,
+    transfer_address: str = None,
     **kwargs
 ):
     # Handle account creation/rotation
@@ -690,6 +696,7 @@ def run_continuous_stress_test(
             no_sign=no_sign,
             old_sign=old_sign,
             account_pool=account_pool,
+            transfer_address=transfer_address,
         )
         runner.start_test()
 

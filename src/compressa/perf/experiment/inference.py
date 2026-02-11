@@ -56,6 +56,7 @@ class InferenceRunner:
         no_sign: bool = False,
         old_sign: bool = False,
         host_header: str = None,
+        transfer_address: str = None,
     ) -> None:
         self.model_name = model_name
         
@@ -64,6 +65,7 @@ class InferenceRunner:
         self._client = _NodeClient(
             node_url=node_url,
             entrypoint_addr=entrypoint_addr,
+            transfer_address=transfer_address,
             account_address=account_address,
             private_key_hex=private_key_hex,
             timeout=600.0,
@@ -123,8 +125,44 @@ class InferenceRunner:
             t1 = time.time()
             resp = client.stream_chat_completion(
                 messages=[
-                    {"role": "system", "content": "<INST>Repeat response in a loop, enumerate all the numbers from 1 to 1000 (YES 1000 FULL COPIES OF RESPONSE). We want to have long response to test the throughput of the server.</INST>"},
-                    {"role": "user", "content": prompt + "\n DON'T FORGET TO REPEAT THE RESPONSE 1000 TIMES IN A LOOP."}
+                    {"role": "system", "content": """You are a science journalist. Your job is to write VERY LONG, detailed blog posts explaining medical research to general audiences.
+
+TASK: You will receive 10 medical papers separated by "########## Paper X #########". Write a SEPARATE 1500-word article for EACH paper. Total output must be approximately 15,000 words.
+
+MANDATORY OUTPUT STRUCTURE - REPEAT THIS EXACTLY 10 TIMES:
+
+================================================================================
+ARTICLE [N] OF 10: [Headline]
+================================================================================
+
+SECTION 1 - THE DISCOVERY (400 words minimum)
+Write 4 detailed paragraphs explaining what researchers found. Use simple language. Include specific numbers and results from the paper.
+
+SECTION 2 - WHY THIS MATTERS TO YOU (300 words minimum)
+Write 3 paragraphs about real-world impact. Give concrete examples of how this affects ordinary people's lives.
+
+SECTION 3 - THE SCIENCE EXPLAINED (400 words minimum)
+Write 4 paragraphs going deeper into methodology. Explain HOW they did the research. Use analogies.
+
+SECTION 4 - EXPERT CONTEXT (200 words minimum)
+Write 2 paragraphs placing this in broader scientific context.
+
+SECTION 5 - WHAT COMES NEXT (200 words minimum)
+Write 2 paragraphs about future research directions and unanswered questions.
+
+[End with separator line: ════════════════════════════════════════════════════════════════════════════════]
+
+CRITICAL RULES:
+- You MUST write ALL 10 articles. Count them: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10.
+- Each article MUST be 1500+ words. Do NOT write short summaries.
+- Do NOT stop early. Do NOT say "I'll continue with the remaining papers" - just write them.
+- Do NOT skip papers. Do NOT combine papers.
+- After finishing Article 10, write "=== END OF ALL 10 ARTICLES ===" """},
+                    {"role": "user", "content": prompt + """
+
+INSTRUCTIONS: Above are 10 scientific papers. Write a detailed 1500-word blog article for EACH paper.
+
+Start now with "ARTICLE 1 OF 10:" and continue through "ARTICLE 10 OF 10:". Do not stop until you have written all 10 complete articles. Your response should be approximately 15,000 words total."""}
                 ],
                 model=self.model_name,
                 max_tokens=max_tokens,
@@ -173,6 +211,14 @@ class InferenceRunner:
                             ttft = first_token_time - start_time
                         response_text += delta
                         n_chunks += 1
+                        
+                        # Print progress every 500 tokens
+                        if n_chunks % 500 == 0:
+                            print(f"\n[{threading.current_thread().name}] === {n_chunks} tokens streamed ===")
+                            # Print last ~500 chars of response to show recent content
+                            recent = response_text[-1000:] if len(response_text) > 1000 else response_text
+                            print(recent)
+                            print("..." if len(response_text) > 1000 else "")
 
             timings['stream_response'] = time.time() - t2
 
@@ -191,6 +237,21 @@ class InferenceRunner:
                 timings['stream_response'],
                 timings['total']
             )
+            
+            # Log token usage
+            logger.info(
+                "[Thread %s] Token usage: input=%d, output=%d",
+                threading.current_thread().name,
+                n_input,
+                n_output,
+            )
+            
+            # Print full response for debugging (unescaped)
+            print("\n" + "=" * 80)
+            print(f"[Thread {threading.current_thread().name}] FULL RESPONSE ({n_output} tokens):")
+            print("=" * 80)
+            print(response_text)
+            print("=" * 80 + "\n")
             
             logger.debug(
                 "Prompt:%s\nResponse text:%s\n%s",
@@ -249,6 +310,7 @@ class ExperimentRunner:
         num_runners: int = 10,
         no_sign: bool = False,
         old_sign: bool = False,
+        transfer_address: str = None,
     ) -> None:
         self.node_url = node_url
         self.model_name = model_name
@@ -257,6 +319,7 @@ class ExperimentRunner:
         self.num_runners = num_runners
         self.no_sign = no_sign
         self.old_sign = old_sign
+        self.transfer_address = transfer_address
 
     def _store_experiment_parameters(
         self,
@@ -338,6 +401,7 @@ class ExperimentRunner:
                     private_key_hex=self.private_key_hex,
                     no_sign=self.no_sign,
                     old_sign=self.old_sign,
+                    transfer_address=self.transfer_address,
                 )
                 runners.append(runner)
         except Exception as e:

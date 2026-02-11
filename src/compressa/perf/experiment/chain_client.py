@@ -68,6 +68,7 @@ class _NodeClient:
         self,
         node_url: str,
         entrypoint_addr: str = "",
+        transfer_address: str = None,
         account_address: str = None,
         private_key_hex: str = None,
         timeout: float = 600.0,
@@ -85,6 +86,7 @@ class _NodeClient:
         self.no_sign = no_sign
         self.old_sign = old_sign
         self.entrypoint_addr = entrypoint_addr
+        self.transfer_address = transfer_address
         self.host_header = host_header
 
         # Check system limits on first initialization
@@ -260,7 +262,8 @@ class _NodeClient:
             if not self.no_sign:
                 timestamp_ns = int(time.time_ns())
                 
-                transfer_address = self.entrypoint_addr
+                # Use explicit transfer_address if provided, otherwise fall back to entrypoint_addr
+                transfer_address = self.transfer_address if self.transfer_address else self.entrypoint_addr
                 
                 if self.old_sign:
                     headers["Authorization"] = self._old_sign(payload_bytes)

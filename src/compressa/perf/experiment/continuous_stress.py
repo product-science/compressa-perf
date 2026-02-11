@@ -50,6 +50,7 @@ class ContinuousStressTestRunner:
         no_sign: bool = False,
         old_sign: bool = False,
         account_pool: List[Tuple[str, str]] = None,
+        transfer_address: str = None,
     ):
         self.db_path = db_path
         self.node_url = node_url
@@ -64,6 +65,7 @@ class ContinuousStressTestRunner:
         self.running = True
         self.no_sign = no_sign
         self.old_sign = old_sign
+        self.transfer_address = transfer_address
 
         self.experiment_start_ts = time.time()
         self.window_count = 1
@@ -120,6 +122,7 @@ class ContinuousStressTestRunner:
                     private_key_hex=acc_key,
                     no_sign=no_sign,
                     old_sign=old_sign,
+                    transfer_address=self.transfer_address,
                 )
                 self.runners.append(runner)
                 self.runner_queue.put(runner)
