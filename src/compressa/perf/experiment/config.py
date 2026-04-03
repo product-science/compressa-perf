@@ -16,6 +16,7 @@ class ExperimentConfig:
     num_prompts: int = None
     prompt_length: int = None
     max_tokens: int = None
+    min_tokens: int = None
     prompts_file: str = None
     seed: int = 42
     node_url: str = None

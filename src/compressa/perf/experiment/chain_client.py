@@ -222,6 +222,7 @@ class _NodeClient:
         messages: List[dict],
         model: str,
         max_tokens: int,
+        min_tokens: int = None,
         temperature: float = 0.8,
     ):
         """Send a streaming chat/completions request and return the raw response."""
@@ -236,6 +237,8 @@ class _NodeClient:
             },
             "_nonce": str(int.from_bytes(os.urandom(4), "big"))
         }
+        if min_tokens is not None:
+            payload["min_tokens"] = min_tokens
         try:
             payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
         except Exception as e:

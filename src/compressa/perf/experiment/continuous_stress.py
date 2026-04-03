@@ -42,6 +42,7 @@ class ContinuousStressTestRunner:
         prompts: List[str] = None,
         num_runners: int = 10,
         max_tokens: int = 1000,
+        min_tokens: int = None,
         report_freq_min: float = 1.0,
         seed: int = 42,
         no_sign: bool = False,
@@ -57,6 +58,7 @@ class ContinuousStressTestRunner:
         self.prompts = prompts
         self.num_runners = num_runners
         self.max_tokens = max_tokens
+        self.min_tokens = min_tokens
         self.report_freq_sec = report_freq_min * 60
         self.running = True
         self.no_sign = no_sign
@@ -210,6 +212,7 @@ class ContinuousStressTestRunner:
                     experiment_id=self.experiment_id,
                     prompt=prompt,
                     max_tokens=self.max_tokens,
+                    min_tokens=self.min_tokens,
                 )
             else:
                 # Use shared client manager for single account
@@ -217,6 +220,7 @@ class ContinuousStressTestRunner:
                     experiment_id=self.experiment_id,
                     prompt=prompt,
                     max_tokens=self.max_tokens,
+                    min_tokens=self.min_tokens,
                 )
             
             insert_measurement(meas)

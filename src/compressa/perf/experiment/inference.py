@@ -62,6 +62,7 @@ class InferenceRunner:
         experiment_id: int,
         prompt: str,
         max_tokens: int,
+        min_tokens: int = None,
     ) -> Measurement:
         start_time = time.time()
         first_token_time = -1.0
@@ -80,6 +81,7 @@ class InferenceRunner:
                 messages=[{"role": "user", "content": prompt}],
                 model=self.model_name,
                 max_tokens=max_tokens,
+                min_tokens=min_tokens,
             )
 
             # Use context manager for proper resource cleanup
@@ -239,6 +241,7 @@ class ExperimentRunner:
         prompts: List[str],
         num_tasks: int = 100,
         max_tokens: int = 1000,
+        min_tokens: int = None,
         seed: int = 42,
     ) -> None:
 
@@ -262,6 +265,7 @@ class ExperimentRunner:
                         experiment_id,
                         rng.choice(prompts),
                         max_tokens,
+                        min_tokens,
                     )
                     for i in range(num_tasks)
                 ]

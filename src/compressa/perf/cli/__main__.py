@@ -45,6 +45,7 @@ def run_experiment_args(args):
         num_prompts=args.num_prompts,
         prompt_length=args.prompt_length,
         max_tokens=args.max_tokens,
+        min_tokens=args.min_tokens,
         no_sign=args.no_sign,
         old_sign=args.old_sign,
         create_account_testnet=args.create_account_testnet,
@@ -108,6 +109,7 @@ def run_continuous_stress_test_args(args):
         num_prompts=args.num_prompts,
         prompt_length=args.prompt_length,
         max_tokens=args.max_tokens,
+        min_tokens=args.min_tokens,
         report_freq_min=args.report_freq_min,
         no_sign=args.no_sign,
         old_sign=args.old_sign,
@@ -289,6 +291,11 @@ OTHER EXAMPLES:
         "--max_tokens", "--max-tokens", 
         type=int, default=1000, dest="max_tokens",
         help="Maximum tokens for model to generate (default: 1000)"
+    )
+    parser_run.add_argument(
+        "--min_tokens", "--min-tokens",
+        type=int, default=None, dest="min_tokens",
+        help="Minimum tokens to generate before allowing EOS (forces stable output length)"
     )
     parser_run.set_defaults(func=run_experiment_args)
 
@@ -513,6 +520,11 @@ OTHER EXAMPLES:
         "--max_tokens", "--max-tokens", 
         type=int, default=1000, dest="max_tokens",
         help="Maximum tokens for generation (default: 1000)"
+    )
+    parser_stress.add_argument(
+        "--min_tokens", "--min-tokens",
+        type=int, default=None, dest="min_tokens",
+        help="Minimum tokens to generate before allowing EOS (forces stable output length)"
     )
     
     # Advanced options (lower priority)
