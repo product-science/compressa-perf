@@ -1,6 +1,7 @@
 import sqlite3
 from tabulate import tabulate
-from typing import List, Tuple
+from typing import Dict, List, Tuple, Union
+import json
 
 import pandas as pd
 
@@ -41,6 +42,20 @@ import sys
 import os
 
 DEFAULT_DB_PATH = "compressa-perf-db.sqlite"
+
+
+def _wait_for_db_writer(db_writer, context: str) -> None:
+    if db_writer is None:
+        return
+    if not db_writer.wait_for_write():
+        raise TimeoutError(f"Timed out waiting for DB writer after {context}")
+
+
+def _count_experiment_rows(conn: sqlite3.Connection, table: str, experiment_id: int) -> int:
+    return conn.execute(
+        f"SELECT COUNT(*) FROM {table} WHERE experiment_id = ?",
+        (experiment_id,),
+    ).fetchone()[0]
 
 
 def _create_testnet_account(
@@ -186,6 +201,30 @@ def _create_testnet_account_pool(
 
 
 logger = get_logger(__name__)
+DEFAULT_API_TOKEN_ENV_VAR = "GONKA_API_TOKEN"
+
+
+def normalize_node_url(node_url: str) -> str:
+    if not node_url:
+        return node_url
+
+    normalized = node_url.strip()
+    if not normalized:
+        return normalized
+
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", normalized):
+        normalized = f"http://{normalized}"
+
+    return normalized.rstrip("/")
+
+
+def resolve_api_token(
+    api_token: str = None,
+    api_token_env_var: str = None,
+) -> Tuple[str, str]:
+    env_var_name = api_token_env_var or DEFAULT_API_TOKEN_ENV_VAR
+    resolved_api_token = api_token if api_token is not None else os.getenv(env_var_name)
+    return resolved_api_token, env_var_name
 
 
 def format_value(value, precision=4):
@@ -242,7 +281,107 @@ def generate_prompts_list(
         prompts.append(prompt)
     return prompts
 
+ChatMessage = Dict[str, str]
+PromptInput = Union[str, List[ChatMessage]]
+
+
+def _normalize_chat_messages(messages) -> List[ChatMessage]:
+    normalized_messages = []
+    for message in messages:
+        if not isinstance(message, dict):
+            raise ValueError(f"Chat message must be an object, got: {type(message).__name__}")
+
+        role = message.get("role")
+        content = message.get("content")
+        if role is None or content is None:
+            raise ValueError("Each chat message must contain both 'role' and 'content'")
+
+        normalized_messages.append(
+            {
+                "role": str(role),
+                "content": str(content),
+            }
+        )
+
+    if not normalized_messages:
+        raise ValueError("Chat prompt cannot be empty")
+
+    return normalized_messages
+
+
+def _truncate_chat_messages(messages: List[ChatMessage], prompt_length: int) -> List[ChatMessage]:
+    if not prompt_length or prompt_length <= 0:
+        return messages
+
+    total_length = sum(len(message["content"]) for message in messages)
+    if total_length <= prompt_length:
+        return messages
+
+    truncated_messages = []
+    remaining_length = prompt_length
+
+    # Keep the newest turns first. This mirrors how long chat contexts are usually
+    # trimmed in production systems when they approach the context window.
+    for message in reversed(messages):
+        if remaining_length <= 0:
+            break
+
+        content = message["content"]
+        if len(content) <= remaining_length:
+            truncated_messages.append(message)
+            remaining_length -= len(content)
+            continue
+
+        truncated_messages.append(
+            {
+                "role": message["role"],
+                "content": content[-remaining_length:],
+            }
+        )
+        remaining_length = 0
+
+    return list(reversed(truncated_messages))
+
+
+def _read_structured_prompts(records, prompt_length: int) -> List[PromptInput]:
+    prompts = []
+    for index, record in enumerate(records, start=1):
+        if isinstance(record, list):
+            messages = record
+        elif isinstance(record, dict):
+            if "messages" in record:
+                messages = record["messages"]
+            elif "conversation" in record:
+                messages = record["conversation"]
+            else:
+                raise ValueError(
+                    f"Structured prompt record #{index} must contain 'messages' or 'conversation'"
+                )
+        else:
+            raise ValueError(
+                f"Structured prompt record #{index} must be a JSON object or array, got {type(record).__name__}"
+            )
+
+        normalized_messages = _normalize_chat_messages(messages)
+        prompts.append(_truncate_chat_messages(normalized_messages, prompt_length))
+
+    return prompts
+
+
 def read_prompts_from_file(file_path, prompt_length):
+    lower_path = file_path.lower()
+    if lower_path.endswith(".jsonl"):
+        with open(file_path, "r", encoding="utf-8") as file:
+            records = [json.loads(line) for line in file if line.strip()]
+        return _read_structured_prompts(records, prompt_length)
+
+    if lower_path.endswith(".json"):
+        with open(file_path, "r", encoding="utf-8") as file:
+            records = json.load(file)
+        if not isinstance(records, list):
+            records = [records]
+        return _read_structured_prompts(records, prompt_length)
+
     df = pd.read_csv(file_path, header=None)
     return df[0].map(lambda x: x[:prompt_length]).tolist()
 
@@ -252,6 +391,8 @@ def run_experiment(
     model_name: str = None,
     account_address: str = None,
     private_key_hex: str = None,
+    api_token: str = None,
+    api_token_env_var: str = None,
     experiment_name: str = None,
     description: str = None,
     prompts_file: str = None,
@@ -265,11 +406,13 @@ def run_experiment(
     seed: int = 42,
     no_sign: bool = False,
     old_sign: bool = False,
+    transport: str = "requests",
     create_account_testnet: bool = False,
     account_name: str = None,
     inferenced_path: str = "./inferenced",
     **kwargs
 ):
+    node_url = normalize_node_url(node_url)
     if create_account_testnet:
         account_name = account_name or "testnetuser"
         account_address, private_key_hex = _create_testnet_account(
@@ -277,9 +420,13 @@ def run_experiment(
             seed_url=node_url,
             inferenced_path=inferenced_path
         )
+    api_token, _ = resolve_api_token(
+        api_token=api_token,
+        api_token_env_var=api_token_env_var,
+    )
     if not node_url:
         raise ValueError("node_url is not set")
-    if not no_sign:
+    if not no_sign and not api_token:
         if not account_address:
             raise ValueError("account_address is not set (required when --no-sign is not used)")
         if not private_key_hex:
@@ -295,9 +442,11 @@ def run_experiment(
             model_name=model_name,
             account_address=account_address,
             private_key_hex=private_key_hex,
+            api_token=api_token,
             num_runners=num_runners,
             no_sign=no_sign,
             old_sign=old_sign,
+            transport=transport,
         )
 
         experiment = Experiment(
@@ -325,10 +474,10 @@ def run_experiment(
             seed=seed,
         )
 
-        db_writer.wait_for_write()
+        _wait_for_db_writer(db_writer, "experiment measurements")
         analyzer = Analyzer(conn)
         analyzer.compute_metrics(experiment.id)
-        db_writer.wait_for_write()
+        _wait_for_db_writer(db_writer, "metric computation")
 
         report_experiment(
             experiment_id=experiment.id,
@@ -345,8 +494,7 @@ def report_experiment(
 ):
     with sqlite3.connect(db) as conn:
         ensure_db_initialized(conn)
-        start_db_writer(db)
-        db_writer = get_db_writer()
+        db_writer = None
 
         experiment = fetch_experiment_by_id(conn, experiment_id)
         if not experiment:
@@ -356,11 +504,33 @@ def report_experiment(
         analyzer = Analyzer(conn)
 
         if recompute:
+            start_db_writer(db)
+            db_writer = get_db_writer()
             clear_metrics_by_experiment(conn, experiment_id)
             analyzer.compute_metrics(experiment_id)
+            _wait_for_db_writer(db_writer, "metric recomputation")
+            same_conn_metric_count = _count_experiment_rows(conn, "Metrics", experiment_id)
+            same_conn_parameter_count = _count_experiment_rows(conn, "Parameters", experiment_id)
+            with sqlite3.connect(db) as verify_conn:
+                fresh_conn_metric_count = _count_experiment_rows(verify_conn, "Metrics", experiment_id)
+                fresh_conn_parameter_count = _count_experiment_rows(verify_conn, "Parameters", experiment_id)
+            logger.info(
+                "Post-recompute row counts for experiment_id=%s: same_conn metrics=%s parameters=%s; fresh_conn metrics=%s parameters=%s",
+                experiment_id,
+                same_conn_metric_count,
+                same_conn_parameter_count,
+                fresh_conn_metric_count,
+                fresh_conn_parameter_count,
+            )
 
         parameters = fetch_parameters_by_experiment(conn, experiment_id)
         metrics = fetch_metrics_by_experiment(conn, experiment_id)
+        logger.info(
+            "Fetched report rows for experiment_id=%s: parameters=%s metrics=%s",
+            experiment_id,
+            len(parameters),
+            len(metrics),
+        )
 
         print(f"\nExperiment Details:")
         print(f"ID: {experiment.id}")
@@ -387,8 +557,8 @@ def report_experiment(
             tablefmt="fancy_grid", 
             numalign="decimal",
         ))
-        db_writer.wait_for_write()
-        stop_db_writer()
+        if db_writer is not None:
+            stop_db_writer()
 
 
 def list_experiments(
@@ -523,9 +693,12 @@ def run_experiments_from_yaml(
     node_url: str = None,
     account_address: str = None,
     private_key_hex: str = None,
+    api_token: str = None,
+    api_token_env_var: str = None,
     model_name: str = None,
     no_sign: bool = False,
     old_sign: bool = False,
+    transport: str = None,
     create_account_testnet: bool = False,
     account_name: str = None,
     inferenced_path: str = "./inferenced",
@@ -533,7 +706,7 @@ def run_experiments_from_yaml(
 ):
     effective_account_address = account_address
     effective_private_key_hex = private_key_hex
-    effective_node_url = node_url
+    effective_node_url = normalize_node_url(node_url) if node_url else None
     if create_account_testnet:
         account_name = account_name or "testnetuser"
         effective_account_address, effective_private_key_hex = _create_testnet_account(
@@ -541,28 +714,31 @@ def run_experiments_from_yaml(
             seed_url=effective_node_url,
             inferenced_path=inferenced_path
         )
-    
-    # Check for private_key_hex after account creation logic
-    if not no_sign and not effective_private_key_hex:
-        raise ValueError("private_key_hex is not set (required when --no-sign is not used)")
 
     configs = load_yaml_configs(yaml_file)
 
     for config in configs:
         # Use command-line node_url if provided, otherwise use from config
-        config_node_url = effective_node_url if effective_node_url else config.node_url
+        config_node_url = effective_node_url if effective_node_url else normalize_node_url(config.node_url)
         if not config_node_url:
             raise ValueError("node_url is not set (neither in command line nor in config file)")
 
+        config_api_token_env_var = api_token_env_var or getattr(config, "api_token_env_var", None)
+        config_api_token, _ = resolve_api_token(
+            api_token=api_token,
+            api_token_env_var=config_api_token_env_var,
+        )
+
         # Use command-line account_address if provided, otherwise use from config
         config_account_address = effective_account_address if effective_account_address else config.account_address
-        if not config_account_address:
-            raise ValueError("account_address is not set (neither in command line nor in config file)")
 
         # Use command-line private_key_hex if provided, otherwise use from config
         config_private_key_hex = effective_private_key_hex if effective_private_key_hex else getattr(config, 'private_key_hex', None)
-        if not no_sign and not config_private_key_hex:
-            raise ValueError("private_key_hex is not set (required when --no-sign is not used)")
+        if not no_sign and not config_api_token:
+            if not config_account_address:
+                raise ValueError("account_address is not set (required when bearer auth is unavailable and --no-sign is not used)")
+            if not config_private_key_hex:
+                raise ValueError("private_key_hex is not set (required when bearer auth is unavailable and --no-sign is not used)")
 
         # Use command-line model_name if provided, otherwise use from config
         config_model_name = model_name if model_name else config.model_name
@@ -575,6 +751,8 @@ def run_experiments_from_yaml(
             model_name=config_model_name,
             account_address=config_account_address,
             private_key_hex=config_private_key_hex,
+            api_token=config_api_token,
+            api_token_env_var=config_api_token_env_var,
             experiment_name=config.experiment_name,
             description=config.description,
             prompts_file=config.prompts_file,
@@ -588,6 +766,7 @@ def run_experiments_from_yaml(
             seed=config.seed,
             no_sign=no_sign,
             old_sign=old_sign,
+            transport=transport or getattr(config, "transport", "requests"),
         )
 
     list_experiments(db=db)
@@ -612,12 +791,16 @@ def run_continuous_stress_test(
     report_freq_min: float = 1.0,
     no_sign: bool = False,
     old_sign: bool = False,
+    transport: str = "requests",
     create_account_testnet: bool = False,
     account_name: str = None,
     inferenced_path: str = "./inferenced",
     account_pool_size: int = 1,
+    api_token: str = None,
+    api_token_env_var: str = None,
     **kwargs
 ):
+    node_url = normalize_node_url(node_url)
     # Handle account creation/rotation
     account_pool = None
     if create_account_testnet:
@@ -640,6 +823,10 @@ def run_continuous_stress_test(
                 seed_url=node_url,
                 inferenced_path=inferenced_path
             )
+    api_token, _ = resolve_api_token(
+        api_token=api_token,
+        api_token_env_var=api_token_env_var,
+    )
     """
     Creates an Experiment, loads or generates prompts, and starts
     an infinite stress test that computes windowed metrics in real time.
@@ -647,7 +834,7 @@ def run_continuous_stress_test(
     """
     if not node_url:
         raise ValueError("node_url is not set")
-    if not no_sign:
+    if not no_sign and not api_token:
         if not account_address:
             raise ValueError("account_address is not set (required when --no-sign is not used)")
         if not private_key_hex:
@@ -681,6 +868,7 @@ def run_continuous_stress_test(
             model_name=model_name,
             account_address=account_address,
             private_key_hex=private_key_hex,
+            api_token=api_token,
             experiment_id=experiment.id,
             prompts=prompts,
             num_runners=num_runners,
@@ -689,16 +877,18 @@ def run_continuous_stress_test(
             report_freq_min=report_freq_min,
             no_sign=no_sign,
             old_sign=old_sign,
+            transport=transport,
             account_pool=account_pool,
         )
         runner.start_test()
 
-        db_writer.wait_for_write()
+        _wait_for_db_writer(db_writer, "continuous stress writes")
         stop_db_writer()
 
 
 def check_balances(node_url: str):
     """Check balances of all participants in the network and print as a table with URLs, weight, models, balance, and address. Sorted by weight descending."""
+    node_url = normalize_node_url(node_url)
     try:
         response = requests.get(f"{node_url}/v1/epochs/current/participants", timeout=10)
         data = response.json()

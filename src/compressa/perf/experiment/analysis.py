@@ -255,6 +255,14 @@ class Analyzer:
         if not metrics_dict:
             raise ValueError(f"No successful measurements found for experiment_id {experiment_id}")
 
+        logger.info(
+            "Computed metrics for experiment_id=%s: metrics=%s io_stats=%s measurement_count=%s",
+            experiment_id,
+            sorted(metrics_dict.keys()),
+            sorted(io_stats.keys()),
+            len(measurements),
+        )
+
         from datetime import datetime
         now = datetime.now()
         for base_name, val in metrics_dict.items():

@@ -21,6 +21,8 @@ class ExperimentConfig:
     seed: int = 42
     node_url: str = None
     account_address: str = None
+    api_token_env_var: str = None
+    transport: str = "requests"
 
 def load_yaml_configs(file_path: str) -> List[ExperimentConfig]:
     with open(file_path, 'r') as file:

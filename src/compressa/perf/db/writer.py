@@ -25,7 +25,6 @@ class DBWriterThread:
         self.db_path = db_path
         self.batch_size = batch_size
         self.queue = queue.Queue()
-        self.running = True
         self.thread: Optional[threading.Thread] = None
 
     def start(self):
@@ -46,7 +45,7 @@ class DBWriterThread:
                 self.queue.task_done()
             items_batch.clear()
 
-        while self.running:
+        while True:
             try:
                 item = self.queue.get(timeout=0.1)
             except queue.Empty:
@@ -54,6 +53,7 @@ class DBWriterThread:
                 continue
 
             if item is None:
+                self.queue.task_done()
                 flush_batch()
                 break
 
@@ -74,9 +74,7 @@ class DBWriterThread:
             direct_insert_parameter(conn, item.item_data)
 
     def stop(self):
-        self.running = False
         self.queue.put(None)
-        self.wait_for_write()
         if self.thread:
             self.thread.join()
 
@@ -89,7 +87,11 @@ class DBWriterThread:
     def push_parameter(self, parameter: Parameter):
         self.queue.put(DBWriteItem(WriteItemType.PARAMETER, parameter))
 
-    def wait_for_write(self, timeout: float = 10.0) -> bool:
+    def wait_for_write(self, timeout: Optional[float] = None) -> bool:
+        if timeout is None:
+            self.queue.join()
+            return True
+
         e = threading.Event()
 
         def run_join():

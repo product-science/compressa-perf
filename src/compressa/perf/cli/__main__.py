@@ -1,7 +1,9 @@
 import argparse
 import signal
 import sys
+from pathlib import Path
 from typing import List
+from dotenv import find_dotenv, load_dotenv
 from compressa.perf.cli.tools import (
     run_experiment,
     report_experiment,
@@ -15,6 +17,15 @@ from compressa.perf.db.setup import (
     stop_db_writer,
     get_db_writer,
 )
+
+
+def _autoload_dotenv() -> None:
+    repo_root_dotenv = Path(__file__).resolve().parents[4] / ".env"
+    load_dotenv(dotenv_path=repo_root_dotenv, override=False)
+
+    cwd_dotenv = find_dotenv(filename=".env", usecwd=True)
+    if cwd_dotenv:
+        load_dotenv(dotenv_path=cwd_dotenv, override=False)
 
 
 def handle_stop_signals(signum, frame):
@@ -36,6 +47,7 @@ def run_experiment_args(args):
         model_name=args.model_name,
         account_address=args.account_address,
         private_key_hex=args.private_key_hex,
+        api_token_env_var=args.api_token_env_var,
         experiment_name=args.experiment_name,
         description=args.description,
         prompts_file=args.prompts_file,
@@ -48,6 +60,7 @@ def run_experiment_args(args):
         min_tokens=args.min_tokens,
         no_sign=args.no_sign,
         old_sign=args.old_sign,
+        transport=args.transport,
         create_account_testnet=args.create_account_testnet,
         account_name=args.account_name,
         inferenced_path=args.inferenced_path
@@ -81,9 +94,11 @@ def run_experiments_from_yaml_args(args):
         node_url=args.node_url,
         account_address=args.account_address,
         private_key_hex=args.private_key_hex,
+        api_token_env_var=args.api_token_env_var,
         model_name=args.model_name,
         no_sign=args.no_sign,
         old_sign=args.old_sign,
+        transport=args.transport,
         create_account_testnet=args.create_account_testnet,
         account_name=args.account_name,
         inferenced_path=args.inferenced_path
@@ -101,6 +116,7 @@ def run_continuous_stress_test_args(args):
         model_name=args.model_name,
         account_address=args.account_address,
         private_key_hex=args.private_key_hex,
+        api_token_env_var=args.api_token_env_var,
         experiment_name=args.experiment_name,
         description=args.description,
         prompts_file=args.prompts_file,
@@ -113,6 +129,7 @@ def run_continuous_stress_test_args(args):
         report_freq_min=args.report_freq_min,
         no_sign=args.no_sign,
         old_sign=args.old_sign,
+        transport=args.transport,
         create_account_testnet=args.create_account_testnet,
         account_name=args.account_name,
         inferenced_path=args.inferenced_path,
@@ -128,6 +145,7 @@ def check_balances_args(args):
 
 
 def main():
+    _autoload_dotenv()
     parser = argparse.ArgumentParser(
         description="CLI tool for running and analyzing experiments",
         epilog="""
@@ -229,6 +247,20 @@ OTHER EXAMPLES:
         "--no-sign", "--no_sign", 
         action="store_true", dest="no_sign",
         help="Send requests without signing (for testing unsigned mode)"
+    )
+    parser_run.add_argument(
+        "--api-token-env-var",
+        type=str,
+        default="GONKA_API_TOKEN",
+        dest="api_token_env_var",
+        help="Environment variable to read bearer token from (default: GONKA_API_TOKEN)"
+    )
+    parser_run.add_argument(
+        "--transport",
+        type=str,
+        choices=["requests", "aiohttp"],
+        default="requests",
+        help="HTTP transport implementation to use (default: requests)",
     )
     
     # Experiment configuration
@@ -409,6 +441,20 @@ OTHER EXAMPLES:
         action="store_true", dest="no_sign",
         help="Send requests without signing (for testing unsigned mode)"
     )
+    parser_yaml.add_argument(
+        "--api-token-env-var",
+        type=str,
+        default=None,
+        dest="api_token_env_var",
+        help="Environment variable to read bearer token from (overrides YAML config, default: GONKA_API_TOKEN)"
+    )
+    parser_yaml.add_argument(
+        "--transport",
+        type=str,
+        choices=["requests", "aiohttp"],
+        default=None,
+        help="HTTP transport implementation to use (overrides YAML config if provided)",
+    )
     
     # Advanced options (lower priority)
     parser_yaml.add_argument(
@@ -493,6 +539,20 @@ OTHER EXAMPLES:
         "--no-sign", "--no_sign", 
         action="store_true", dest="no_sign",
         help="Send requests without signing (for testing unsigned mode)"
+    )
+    parser_stress.add_argument(
+        "--api-token-env-var",
+        type=str,
+        default="GONKA_API_TOKEN",
+        dest="api_token_env_var",
+        help="Environment variable to read bearer token from (default: GONKA_API_TOKEN)"
+    )
+    parser_stress.add_argument(
+        "--transport",
+        type=str,
+        choices=["requests", "aiohttp"],
+        default="requests",
+        help="HTTP transport implementation to use (default: requests)",
     )
     
     # Prompt configuration

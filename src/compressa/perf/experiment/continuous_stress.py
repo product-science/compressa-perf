@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 from datetime import datetime
 
-from compressa.perf.experiment.inference import InferenceRunner
+from compressa.perf.experiment.inference import InferenceRunner, _shared_pool_config
 from compressa.perf.experiment.chain_client import OptimizedNodeClientManager
 from compressa.perf.experiment.analysis import Analyzer
 from compressa.perf.data.models import (
@@ -38,6 +38,7 @@ class ContinuousStressTestRunner:
         model_name: str,
         account_address: str = None,
         private_key_hex: str = None,
+        api_token: str = None,
         experiment_id: int = None,
         prompts: List[str] = None,
         num_runners: int = 10,
@@ -47,6 +48,7 @@ class ContinuousStressTestRunner:
         seed: int = 42,
         no_sign: bool = False,
         old_sign: bool = False,
+        transport: str = "requests",
         account_pool: List[Tuple[str, str]] = None,
     ):
         self.db_path = db_path
@@ -54,6 +56,7 @@ class ContinuousStressTestRunner:
         self.model_name = model_name
         self.account_address = account_address
         self.private_key_hex = private_key_hex
+        self.api_token = api_token
         self.experiment_id = experiment_id
         self.prompts = prompts
         self.num_runners = num_runners
@@ -63,6 +66,7 @@ class ContinuousStressTestRunner:
         self.running = True
         self.no_sign = no_sign
         self.old_sign = old_sign
+        self.transport = transport
 
         self.experiment_start_ts = time.time()
         self.window_count = 1
@@ -88,10 +92,12 @@ class ContinuousStressTestRunner:
                     node_url=node_url,
                     account_address=acc_address,
                     private_key_hex=acc_private_key,
+                    api_token=api_token,
                     no_sign=no_sign,
                     old_sign=old_sign,
                     num_clients=num_clients,
                     max_connections_per_client=max_connections_per_client,
+                    transport=transport,
                 )
                 
                 inference_runner = InferenceRunner(
@@ -105,8 +111,7 @@ class ContinuousStressTestRunner:
                 logger.info(f"Created client manager {i+1}/{len(self.account_pool)} for account {acc_address}")
         else:
             # Create single shared client manager for single account
-            num_clients = min(10, max(3, num_runners // 20))  # 3-10 clients based on runner count
-            max_connections_per_client = 50
+            num_clients, max_connections_per_client = _shared_pool_config(num_runners)
             
             logger.info(f"Creating shared client manager with {num_clients} clients, {max_connections_per_client} connections each for {num_runners} runners")
             
@@ -114,10 +119,12 @@ class ContinuousStressTestRunner:
                 node_url=node_url,
                 account_address=account_address,
                 private_key_hex=private_key_hex,
+                api_token=api_token,
                 no_sign=no_sign,
                 old_sign=old_sign,
                 num_clients=num_clients,
                 max_connections_per_client=max_connections_per_client,
+                transport=transport,
             )
 
     def start_test(self):
