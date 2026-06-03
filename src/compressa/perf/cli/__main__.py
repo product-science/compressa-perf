@@ -45,12 +45,15 @@ def run_experiment_args(args):
         num_prompts=args.num_prompts,
         prompt_length=args.prompt_length,
         max_tokens=args.max_tokens,
+        rate_limit_requests=args.rate_limit_requests,
+        rate_limit_window=args.rate_limit_window,
         no_sign=args.no_sign,
         old_sign=args.old_sign,
         create_account_testnet=args.create_account_testnet,
         account_name=args.account_name,
         inferenced_path=args.inferenced_path,
-        transfer_address=args.transfer_address
+        transfer_address=args.transfer_address,
+        token=args.token,
     )
 
 
@@ -231,6 +234,11 @@ OTHER EXAMPLES:
         action="store_true", dest="no_sign",
         help="Send requests without signing (for testing unsigned mode)"
     )
+    parser_run.add_argument(
+        "--token",
+        type=str, required=False, dest="token",
+        help="Bearer token for Authorization header (sent as 'Authorization: Bearer <token>')"
+    )
     
     # Experiment configuration
     parser_run.add_argument(
@@ -242,6 +250,16 @@ OTHER EXAMPLES:
         "--num_runners", "--num-runners", 
         type=int, default=10, dest="num_runners",
         help="Number of concurrent runners (default: 10)"
+    )
+    parser_run.add_argument(
+        "--rate-limit-requests", "--rate_limit_requests",
+        type=int, default=0, dest="rate_limit_requests",
+        help="Maximum request starts per rate limit window (default: 0, disabled)"
+    )
+    parser_run.add_argument(
+        "--rate-limit-window", "--rate_limit_window",
+        type=float, default=5.0, dest="rate_limit_window",
+        help="Rate limit window in seconds when --rate-limit-requests is enabled (default: 5.0)"
     )
     
     # Advanced options (lower priority)

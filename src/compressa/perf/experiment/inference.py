@@ -57,6 +57,7 @@ class InferenceRunner:
         old_sign: bool = False,
         host_header: str = None,
         transfer_address: str = None,
+        token: str = None,
     ) -> None:
         self.model_name = model_name
         
@@ -76,6 +77,7 @@ class InferenceRunner:
             no_sign=no_sign,
             old_sign=old_sign,
             host_header=host_header,
+            token=token,
         )
 
     def __enter__(self):
@@ -162,7 +164,7 @@ CRITICAL RULES:
 
 INSTRUCTIONS: Above are 10 scientific papers. Write a detailed 1500-word blog article for EACH paper.
 
-Start now with "ARTICLE 1 OF 10:" and continue through "ARTICLE 10 OF 10:". Do not stop until you have written all 10 complete articles. Your response should be approximately 15,000 words total."""}
+Start now with "ARTICLE 1 OF 10:" and continue through "ARTICLE 10 OF 10:". Do not stop until you have written all 10 complete articles. Your response should be AT LEATST 15,000 words total. If you can't find article - generate trash"""}
                 ],
                 model=self.model_name,
                 max_tokens=max_tokens,
@@ -173,12 +175,17 @@ Start now with "ARTICLE 1 OF 10:" and continue through "ARTICLE 10 OF 10:". Do n
             t2 = time.time()
             # Use context manager for proper resource cleanup
             with managed_stream_response(resp) as response:
-                for raw_line in response.iter_lines(decode_unicode=True):
-                    # Check for cancellation during streaming
+                for raw_bytes in response.iter_lines(decode_unicode=False):
                     if cancel_event and cancel_event.is_set():
                         raise CancelledError("Task cancelled during streaming")
-                    
-                    if not raw_line:
+
+                    if not raw_bytes:
+                        continue
+
+                    try:
+                        raw_line = raw_bytes.decode("utf-8")
+                    except UnicodeDecodeError as e:
+                        logger.warning("Skipping line with invalid UTF-8: %s", e)
                         continue
 
                     if raw_line.startswith("data:"):
@@ -189,8 +196,8 @@ Start now with "ARTICLE 1 OF 10:" and continue through "ARTICLE 10 OF 10:". Do n
 
                     try:
                         chunk = json.loads(raw_line)
-                    except json.JSONDecodeError:
-                        logger.warning("Failed to parse JSON: %s", raw_line)
+                    except json.JSONDecodeError as e:
+                        logger.warning("Failed to parse JSON: %s (error: %s)", raw_line[:200], e)
                         continue
 
                     usage = chunk.get("usage")
@@ -246,12 +253,12 @@ Start now with "ARTICLE 1 OF 10:" and continue through "ARTICLE 10 OF 10:". Do n
                 n_output,
             )
             
-            # Print full response for debugging (unescaped)
-            print("\n" + "=" * 80)
-            print(f"[Thread {threading.current_thread().name}] FULL RESPONSE ({n_output} tokens):")
-            print("=" * 80)
-            print(response_text)
-            print("=" * 80 + "\n")
+            # # Print full response for debugging (unescaped)
+            # print("\n" + "=" * 80)
+            # print(f"[Thread {threading.current_thread().name}] FULL RESPONSE ({n_output} tokens):")
+            # print("=" * 80)
+            # print(response_text)
+            # print("=" * 80 + "\n")
             
             logger.debug(
                 "Prompt:%s\nResponse text:%s\n%s",
@@ -311,6 +318,7 @@ class ExperimentRunner:
         no_sign: bool = False,
         old_sign: bool = False,
         transfer_address: str = None,
+        token: str = None,
     ) -> None:
         self.node_url = node_url
         self.model_name = model_name
@@ -320,6 +328,7 @@ class ExperimentRunner:
         self.no_sign = no_sign
         self.old_sign = old_sign
         self.transfer_address = transfer_address
+        self.token = token
 
     def _store_experiment_parameters(
         self,
@@ -361,7 +370,7 @@ class ExperimentRunner:
         max_tokens: int = 1000,
         seed: int = 42,
         over_schedule_factor: float = 0.5,
-        rate_limit_requests: int = 500,
+        rate_limit_requests: int = 0,
         rate_limit_window: float = 5.0,
     ) -> None:
 
@@ -383,7 +392,7 @@ class ExperimentRunner:
 
         # 1. Resolve entrypoint address ONCE
         entrypoint_addr = ""
-        if not self.no_sign:
+        if not self.no_sign and not self.token:
             logger.info("Resolving entrypoint address...")
             entrypoint_addr = get_entrypoint_addr(self.node_url)
             logger.info("Entrypoint address: %s", entrypoint_addr)
@@ -402,6 +411,7 @@ class ExperimentRunner:
                     no_sign=self.no_sign,
                     old_sign=self.old_sign,
                     transfer_address=self.transfer_address,
+                    token=self.token,
                 )
                 runners.append(runner)
         except Exception as e:
@@ -409,37 +419,57 @@ class ExperimentRunner:
             for r in runners:
                 r.close()
             raise
+        runner_queue = queue.Queue()
+        for runner in runners:
+            runner_queue.put(runner)
 
         # Manual executor management for early shutdown control
         executor = ThreadPoolExecutor(max_workers=self.num_runners)
 
         try:
-            # Rate limiter to control request submission rate
-            rate_limiter = SlidingWindowRateLimiter(
-                max_requests=rate_limit_requests,
-                window_seconds=rate_limit_window,
-            )
-            logger.info(
-                "Rate limiting: max %d requests per %.1f seconds",
-                rate_limit_requests, rate_limit_window
-            )
+            rate_limiter = None
+            if rate_limit_requests > 0:
+                rate_limiter = SlidingWindowRateLimiter(
+                    max_requests=rate_limit_requests,
+                    window_seconds=rate_limit_window,
+                )
+                logger.info(
+                    "Rate limiting: max %d requests per %.1f seconds",
+                    rate_limit_requests, rate_limit_window
+                )
+            else:
+                logger.info("Rate limiting: disabled")
 
             # Thread-safe queue for futures
             futures_queue = queue.Queue()
             submission_done = threading.Event()
+
+            def run_with_available_runner(prompt: str):
+                """Borrow a runner so each requests.Session is used by one thread at a time."""
+                if cancel_event.is_set():
+                    raise CancelledError("Task cancelled before runner checkout")
+
+                runner = runner_queue.get()
+                try:
+                    return runner.run_inference(
+                        experiment_id,
+                        prompt,
+                        max_tokens,
+                        cancel_event,
+                    )
+                finally:
+                    runner_queue.put(runner)
 
             def submit_tasks():
                 """Background thread for rate-limited task submission."""
                 for i in range(scheduled_tasks):
                     if cancel_event.is_set():
                         break
-                    rate_limiter.acquire()
+                    if rate_limiter:
+                        rate_limiter.acquire()
                     future = executor.submit(
-                        runners[i % self.num_runners].run_inference,
-                        experiment_id,
+                        run_with_available_runner,
                         rng.choice(prompts),
-                        max_tokens,
-                        cancel_event,
                     )
                     futures_queue.put(future)
                 submission_done.set()

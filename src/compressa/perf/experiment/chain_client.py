@@ -79,6 +79,7 @@ class _NodeClient:
         no_sign: bool = False,
         old_sign: bool = False,
         host_header: str = None,
+        token: str = None,
     ) -> None:
         self.node_url = node_url.rstrip("/")
         self.account_address = account_address
@@ -88,6 +89,7 @@ class _NodeClient:
         self.entrypoint_addr = entrypoint_addr
         self.transfer_address = transfer_address
         self.host_header = host_header
+        self.token = token
 
         # Check system limits on first initialization
         if not hasattr(_NodeClient, '_limits_checked'):
@@ -95,7 +97,7 @@ class _NodeClient:
             _NodeClient._limits_checked = True
 
         # Deterministic signing key (only if signing is enabled)
-        if not self.no_sign:
+        if not self.no_sign and not self.token:
             if not account_address:
                 raise ValueError("account_address is required when signing is enabled")
             if not private_key_hex:
@@ -247,7 +249,6 @@ class _NodeClient:
                 "stream_options": {
                     "include_usage": True
                 },
-                "_nonce": str(int.from_bytes(os.urandom(4), "big"))
             }
             try:
                 payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
@@ -259,7 +260,9 @@ class _NodeClient:
                 "Content-Type": "application/json",
             }
 
-            if not self.no_sign:
+            if self.token:
+                headers["Authorization"] = f"Bearer {self.token}"
+            elif not self.no_sign:
                 timestamp_ns = int(time.time_ns())
                 
                 # Use explicit transfer_address if provided, otherwise fall back to entrypoint_addr
